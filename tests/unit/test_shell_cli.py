@@ -19,14 +19,40 @@ from kicad_mcp.deep_inspection import (
     route_plan,
 )
 from kicad_mcp.shell_cli import (
+    _emit_records,
     _erc_finding_keys,
     _resolve_edit_schematic,
     _rewire_tool_calls,
     _schematic_manifest,
+    file_records,
     parse_call_arguments,
     result_envelope,
     run_native_board_transaction,
 )
+
+
+def test_names_output_uses_paths_for_file_manifest_records(capsys) -> None:
+    _emit_records(
+        [
+            {"path": "board.kicad_pcb", "kind": "kicad_pcb", "bytes": 42},
+            {"path": "sheet.kicad_sch", "kind": "kicad_sch", "bytes": 84},
+        ],
+        "names",
+    )
+
+    assert capsys.readouterr().out == "board.kicad_pcb\nsheet.kicad_sch\n"
+
+
+def test_file_manifest_excludes_generated_and_history_trees(tmp_path: Path) -> None:
+    (tmp_path / "live.kicad_sch").write_text("live", encoding="utf-8")
+    for generated in (".history", "build", "output", "tmp"):
+        directory = tmp_path / generated
+        directory.mkdir()
+        (directory / "stale.kicad_sch").write_text("stale", encoding="utf-8")
+
+    records = list(file_records(argparse.Namespace(paths=[str(tmp_path)])))
+
+    assert [Path(str(record["path"])).name for record in records] == ["live.kicad_sch"]
 
 
 def test_rewire_tool_calls_translate_only_physical_operations() -> None:

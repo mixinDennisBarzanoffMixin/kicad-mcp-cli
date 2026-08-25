@@ -64,6 +64,13 @@ KICAD_GLOBS = (
     "*.kicad_dru",
     "*.kicad_jobset",
 )
+GENERATED_TREE_GLOBS = (
+    "**/.git/**",
+    "**/.history/**",
+    "**/build/**",
+    "**/output/**",
+    "**/tmp/**",
+)
 
 
 class BackendServer(Protocol):
@@ -211,7 +218,7 @@ def _emit_records(records: Sequence[dict[str, JSONValue]], output_format: str) -
             print("\t".join(fields))
         return
     for record in records:
-        print(record.get("name", ""))
+        print(record.get("name", record.get("path", "")))
 
 
 def _parse_json_object(raw: str, *, source: str) -> dict[str, Any]:
@@ -825,7 +832,8 @@ def file_records(args: argparse.Namespace) -> Iterator[dict[str, JSONValue]]:
     command = [_rg_binary(), "--files", "--hidden", "--no-messages"]
     for pattern in KICAD_GLOBS:
         command.extend(("--glob", pattern))
-    command.extend(("--glob", "!.git/**"))
+    for pattern in GENERATED_TREE_GLOBS:
+        command.extend(("--glob", f"!{pattern}"))
     command.extend(_project_roots(args))
     process = subprocess.run(command, check=False, capture_output=True, text=True)
     if process.returncode not in (0, 1):
@@ -855,7 +863,9 @@ def grep_records(args: argparse.Namespace) -> Iterator[dict[str, JSONValue]]:
         command.append("--ignore-case")
     for pattern in KICAD_GLOBS:
         command.extend(("--glob", pattern))
-    command.extend(("--glob", "!.git/**", "--", args.pattern))
+    for pattern in GENERATED_TREE_GLOBS:
+        command.extend(("--glob", f"!{pattern}"))
+    command.extend(("--", args.pattern))
     command.extend(_project_roots(args))
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if process.stdout is None:  # pragma: no cover - Popen contract guard
