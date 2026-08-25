@@ -261,9 +261,7 @@ def test_connectivity_proof_does_not_leak_findings_from_filtered_components() ->
         {
             "name": "unconnected-(U2-Pad1)",
             "unconnected": True,
-            "nodes": [
-                {"reference": "U2", "pin": "1", "function": "NC", "type": "no_connect"}
-            ],
+            "nodes": [{"reference": "U2", "pin": "1", "function": "NC", "type": "no_connect"}],
         }
     )
 

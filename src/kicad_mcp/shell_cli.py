@@ -491,6 +491,8 @@ async def run_staged_schematic_edit(args: argparse.Namespace) -> dict[str, Any]:
             )
             if _erc_finding_keys(final_report) != _erc_finding_keys(after_report):
                 raise RuntimeError("promoted project does not reproduce staged ERC evidence")
+            if final_report["checks"]["connectivity"]["status"] == "fail":
+                raise RuntimeError("promoted project failed the final connectivity filter gate")
         except Exception:
             (root / relative).write_bytes(backup)
             if promotion.exists():

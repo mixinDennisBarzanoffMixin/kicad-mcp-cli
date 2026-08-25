@@ -499,6 +499,7 @@ def connectivity_proof(
     singleton_nets: set[str] = set()
     unconnected_pins = 0
     intentional_no_connects = 0
+    matched_requested_nets: set[str] = set()
 
     for candidate in schematic["nets"]:
         net_name = str(candidate["name"])
@@ -506,6 +507,8 @@ def connectivity_proof(
             continue
         nodes = list(candidate["nodes"])
         selected_nodes = [node for node in nodes if node["reference"] in selected_refs]
+        if net and selected_nodes:
+            matched_requested_nets.add(net_name)
         intentional_nodes = [
             node for node in selected_nodes if "+no_connect" in str(node.get("type", ""))
         ]
@@ -568,7 +571,38 @@ def connectivity_proof(
         for row in rows
         if row["board_pad_net"] and row["board_pad_net"] != row["net"]
     ]
-    status = "fail" if duplicate_assignments or board_mismatches else "review"
+    requested_net_not_found = []
+    if net and (not matched_requested_nets or not rows):
+        requested_net_not_found.append(
+            {
+                "code": "requested_net_not_found",
+                "requested": net,
+                "match_semantics": "case-insensitive substring",
+                "selected_components": len(components),
+                "reason": "explicit net filter matched no net pins in the selected scope",
+            }
+        )
+    requested_reference_not_found = []
+    if reference and not components:
+        requested_reference_not_found.append(
+            {
+                "code": "requested_reference_not_found",
+                "requested": reference,
+                "match_semantics": "case-insensitive exact reference",
+                "reason": "explicit reference filter matched no component in the selected scope",
+            }
+        )
+    elif reference and not net and not rows:
+        requested_reference_not_found.append(
+            {
+                "code": "requested_reference_has_no_pins",
+                "requested": reference,
+                "match_semantics": "case-insensitive exact reference",
+                "reason": "explicit reference matched a component but produced no netlisted pins",
+            }
+        )
+    filter_failure = bool(requested_net_not_found or requested_reference_not_found)
+    status = "fail" if duplicate_assignments or board_mismatches or filter_failure else "review"
     if (
         not unconnected_pins
         and not singleton_nets
@@ -581,6 +615,11 @@ def connectivity_proof(
         "project": snapshot["project"]["name"],
         "filters": {"sheet": sheet, "reference": reference, "net": net},
         "status": status,
+        "filter_semantics": {
+            "sheet": "case-insensitive substring",
+            "reference": "case-insensitive exact reference",
+            "net": "case-insensitive substring",
+        },
         "summary": {
             "components": len(components),
             "pins": len(rows),
@@ -597,6 +636,8 @@ def connectivity_proof(
             "missing_footprints": missing_footprints,
             "duplicate_pin_assignments": duplicate_assignments,
             "board_net_mismatches": board_mismatches,
+            "requested_net_not_found": requested_net_not_found,
+            "requested_reference_not_found": requested_reference_not_found,
         },
         "pins": sorted(rows, key=lambda row: (row["reference"], row["pin"], row["net"])),
     }
@@ -653,9 +694,7 @@ def _erc_evidence(schematic: Path, *, sheet: str = "") -> JsonRecord:
     }
 
 
-def board_drc_evidence(
-    project_dir: str | Path, *, board_content: str | None = None
-) -> JsonRecord:
+def board_drc_evidence(project_dir: str | Path, *, board_content: str | None = None) -> JsonRecord:
     """Run KiCad DRC on saved or supplied serialized board state."""
     project, _schematic, board = _project_files(project_dir)
     with tempfile.TemporaryDirectory(prefix="kicadq-drc-") as temporary:
@@ -692,14 +731,10 @@ def board_drc_evidence(
             diagnostic = process.stderr.strip() or process.stdout.strip()
             raise RuntimeError(f"KiCad DRC failed: {diagnostic}")
         payload = json.loads(output.read_text(encoding="utf-8"))
-    findings = [
-        {"kind": "violation", **item} for item in payload.get("violations", [])
-    ] + [
+    findings = [{"kind": "violation", **item} for item in payload.get("violations", [])] + [
         {"kind": "unconnected", **item} for item in payload.get("unconnected_items", [])
     ]
-    keys = sorted(
-        json.dumps(item, sort_keys=True, separators=(",", ":")) for item in findings
-    )
+    keys = sorted(json.dumps(item, sort_keys=True, separators=(",", ":")) for item in findings)
     return {
         "status": "fail" if findings else "pass",
         "summary": {
@@ -750,9 +785,7 @@ def _source_integrity_evidence(
                 }
             )
         if "<<<<<<<" in content or ">>>>>>>" in content:
-            findings.append(
-                {"file": str(path), "type": "merge_conflict_markers", "detail": True}
-            )
+            findings.append({"file": str(path), "type": "merge_conflict_markers", "detail": True})
     return {
         "status": "fail" if findings else "pass",
         "summary": {"files": len(checked), "findings": len(findings)},
@@ -777,9 +810,7 @@ def _render_verification_svgs(
     if sheet and not selected_pages:
         raise ValueError(f"sheet filter matched no pages: {sheet}")
     targets = (
-        [schematic.parent / str(page["file"]) for page in selected_pages]
-        if sheet
-        else [schematic]
+        [schematic.parent / str(page["file"]) for page in selected_pages] if sheet else [schematic]
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     artifacts: list[str] = []
