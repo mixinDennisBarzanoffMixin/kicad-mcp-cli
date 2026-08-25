@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from kicad_mcp.schematic_railway_rewire import (
     format_railway_rewire_plan,
     plan_railway_rewire,
 )
+from kicad_mcp.shell_cli import build_parser, main
 
 
 def _sheet(*, unrelated_crossing: bool = False, local_labels: bool = True) -> str:
@@ -269,3 +271,109 @@ def test_terminal_format_is_explicitly_non_applying(tmp_path: Path) -> None:
     assert "RAILWAY REWIRE" in rendered
     assert "WIRE [12.0, 10.0] -> [18.0, 10.0]" in rendered
     assert "NO APPLY" in rendered
+
+
+def test_plan_rewire_cli_accepts_repeatable_refs_and_has_no_apply_mode() -> None:
+    parser = build_parser()
+    selected = parser.parse_args(
+        [
+            "plan-rewire",
+            "--sheet",
+            "LTE",
+            "--ref",
+            "C15",
+            "--ref",
+            "R11",
+            "--format",
+            "json",
+        ]
+    )
+    whole_sheet = parser.parse_args(["plan-rewire", "--sheet", "LTE"])
+
+    assert selected.command == "plan-rewire"
+    assert selected.references == ["C15", "R11"]
+    assert selected.format == "json"
+    assert whole_sheet.references == []
+    assert not hasattr(selected, "apply")
+
+
+def test_plan_rewire_cli_json_is_pipe_friendly_and_uses_project_directory(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    import kicad_mcp.shell_cli as shell_cli
+
+    calls: dict[str, object] = {}
+    snapshot = {"project": {"name": "demo"}}
+    report = {
+        "schema_version": "1.0",
+        "status": "planned",
+        "read_only": True,
+        "operations": [{"op": "retain_label", "net": "SIG"}],
+    }
+
+    def fake_snapshot(project_root):
+        calls["snapshot_root"] = project_root
+        return snapshot
+
+    def fake_plan(project_root, received_snapshot, *, sheet, cluster_refs):
+        calls.update(
+            {
+                "planner_root": project_root,
+                "snapshot": received_snapshot,
+                "sheet": sheet,
+                "cluster_refs": cluster_refs,
+            }
+        )
+        return report
+
+    monkeypatch.setattr(shell_cli, "project_snapshot", fake_snapshot)
+    monkeypatch.setattr(shell_cli, "plan_railway_rewire", fake_plan)
+
+    main(
+        [
+            "-C",
+            str(tmp_path),
+            "plan-rewire",
+            "--sheet",
+            "Logic",
+            "--ref",
+            "A",
+            "--ref",
+            "B",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert json.loads(capsys.readouterr().out) == report
+    assert calls == {
+        "snapshot_root": tmp_path.resolve(),
+        "planner_root": tmp_path.resolve(),
+        "snapshot": snapshot,
+        "sheet": "Logic",
+        "cluster_refs": ["A", "B"],
+    }
+
+
+def test_plan_rewire_cli_omitted_refs_passes_whole_sheet_scope(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    import kicad_mcp.shell_cli as shell_cli
+
+    received: list[object] = []
+    monkeypatch.setattr(shell_cli, "project_snapshot", lambda _root: {"schematic": {}})
+
+    def fake_plan(_root, _snapshot, *, sheet, cluster_refs):
+        received.extend((sheet, cluster_refs))
+        return {"status": "noop", "nets": []}
+
+    monkeypatch.setattr(shell_cli, "plan_railway_rewire", fake_plan)
+
+    main(["-C", str(tmp_path), "plan-rewire", "--sheet", "Logic", "--format", "json"])
+
+    assert received == ["Logic", None]
+    assert json.loads(capsys.readouterr().out) == {"status": "noop", "nets": []}

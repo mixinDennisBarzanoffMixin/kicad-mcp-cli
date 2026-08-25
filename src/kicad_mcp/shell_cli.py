@@ -45,6 +45,7 @@ from .schematic_graph_placement import (
     format_schematic_graph_placement,
     plan_schematic_graph_placement,
 )
+from .schematic_railway_rewire import format_railway_rewire_plan, plan_railway_rewire
 from .schematic_rewire_plan import format_label_compaction_plan, plan_label_compaction
 from .schematic_spatial import schematic_spatial_map
 from .server import build_server
@@ -853,6 +854,24 @@ def build_parser() -> argparse.ArgumentParser:
     compact_labels.add_argument("--radius", type=float, default=35.0, dest="radius_mm")
     compact_labels.add_argument("--format", choices=("json", "text"), default="text")
 
+    plan_rewire = subcommands.add_parser(
+        "plan-rewire",
+        help="plan exact-pin schematic railway wiring without modifying CAD files",
+    )
+    plan_rewire.add_argument(
+        "--sheet",
+        required=True,
+        help="select exactly one hierarchical sheet by name or file substring",
+    )
+    plan_rewire.add_argument(
+        "--ref",
+        dest="references",
+        action="append",
+        default=[],
+        help="include one cluster reference; repeatable, omitted means the whole sheet",
+    )
+    plan_rewire.add_argument("--format", choices=("json", "text"), default="text")
+
     plan_schematic = subcommands.add_parser(
         "plan-schematic",
         help="dry-run graph-ranked schematic symbol placement and railway wiring",
@@ -1096,6 +1115,19 @@ def main(argv: Sequence[str] | None = None) -> None:
                 print(json.dumps(report, indent=2, sort_keys=True))
             else:
                 print(format_label_compaction_plan(report))
+            return
+        if args.command == "plan-rewire":
+            project_root = Path(args.project_dir or ".").expanduser().resolve()
+            report = plan_railway_rewire(
+                project_root,
+                project_snapshot(project_root),
+                sheet=args.sheet,
+                cluster_refs=args.references or None,
+            )
+            if args.format == "json":
+                print(json.dumps(report, indent=2, sort_keys=True))
+            else:
+                print(format_railway_rewire_plan(report))
             return
         if args.command == "plan-schematic":
             report = plan_schematic_graph_placement(

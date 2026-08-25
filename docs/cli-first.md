@@ -69,6 +69,25 @@ intentional no-connects from accidental dangling pins, and compares PCB pad nets
 when a synchronized board exists. `verify` bundles source-integrity checks,
 connectivity proof, native KiCad ERC JSON, and hop-over SVG renders.
 
+## Read-only schematic railway planning
+
+`plan-rewire` resolves exact pin tips from the selected sheet's cached library
+symbols, classifies local connections separately from shared and cross-sheet
+rails, then proposes orthogonal wires and explicit label operations. Repeated
+`--ref` options define one component cluster; omit every `--ref` to inspect the
+whole selected sheet. The command has no apply mode and does not modify KiCad
+files.
+
+```bash
+kicadq -C ./board plan-rewire --sheet LTE --ref C15 --ref R11
+kicadq -C ./board plan-rewire --sheet LTE --format json |
+  jq '{status, operations, refused: [.nets[] | select(.status == "refused")]}'
+```
+
+The JSON includes source and symbol-position hashes plus the expected
+name-inclusive connectivity fingerprint. A future writer must re-export the
+netlist and prove that fingerprint unchanged before applying any proposal.
+
 ## Atomic schematic edits
 
 Use `edit` instead of direct write calls for routine schematic authoring. It
