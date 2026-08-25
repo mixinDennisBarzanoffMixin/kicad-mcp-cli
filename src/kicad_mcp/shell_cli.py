@@ -863,6 +863,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="preserve one symbol center; repeatable",
     )
+    plan_schematic.add_argument(
+        "--candidates",
+        type=int,
+        choices=range(1, 7),
+        default=6,
+        dest="candidate_count",
+        help="deterministic candidate budget, including saved identity",
+    )
     plan_schematic.add_argument("--format", choices=("json", "text"), default="text")
 
     route = subcommands.add_parser(
@@ -1093,6 +1101,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 args.project_dir or ".",
                 sheet=args.sheet,
                 fixed_references=args.fixed_references,
+                candidate_count=args.candidate_count,
             )
             if args.format == "json":
                 print(json.dumps(report, indent=2, sort_keys=True))

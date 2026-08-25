@@ -511,7 +511,168 @@ def _area(boxes: dict[str, Box]) -> float:
     return round(extent.area, 4) if extent is not None else 0.0
 
 
-def plan_schematic_graph_placement(
+def _clamp_point(
+    point: Point,
+    size: tuple[float, float],
+    page_extent: tuple[float, float],
+    margin_mm: float = 5.0,
+) -> Point:
+    half_width, half_height = size[0] / 2, size[1] / 2
+    return (
+        _snap(min(max(point[0], margin_mm + half_width), page_extent[0] - margin_mm - half_width)),
+        _snap(
+            min(
+                max(point[1], margin_mm + half_height),
+                page_extent[1] - margin_mm - half_height,
+            )
+        ),
+    )
+
+
+def _repair_positions(
+    desired: dict[str, Point],
+    *,
+    old_positions: dict[str, Point],
+    old_boxes: dict[str, Box],
+    sizes: dict[str, tuple[float, float]],
+    page_extent: tuple[float, float],
+    order: list[str],
+    fixed: set[str],
+) -> dict[str, Point]:
+    """Snap, bound, and greedily de-overlap a deterministic desired placement."""
+
+    placed_boxes: dict[str, Box] = {}
+    result: dict[str, Point] = {}
+    offsets = [(0.0, 0.0)]
+    for ring in range(1, 13):
+        ring_offsets = {
+            (dx * _GRID_MM, dy * _GRID_MM)
+            for dx in range(-ring, ring + 1)
+            for dy in range(-ring, ring + 1)
+            if max(abs(dx), abs(dy)) == ring
+        }
+        offsets.extend(sorted(ring_offsets, key=lambda item: (abs(item[0]) + abs(item[1]), item)))
+    for reference in order:
+        if reference in fixed:
+            point = old_positions[reference]
+            result[reference] = point
+            placed_boxes[reference] = _boxes_at(
+                {reference}, {reference: point}, old_positions, old_boxes
+            )[reference]
+            continue
+        base = desired[reference]
+        chosen: Point | None = None
+        chosen_box: Box | None = None
+        for dx, dy in offsets:
+            candidate = _clamp_point((base[0] + dx, base[1] + dy), sizes[reference], page_extent)
+            candidate_box = _boxes_at(
+                {reference}, {reference: candidate}, old_positions, old_boxes
+            )[reference]
+            if all(not candidate_box.overlaps(box, gap_mm=0.5) for box in placed_boxes.values()):
+                chosen, chosen_box = candidate, candidate_box
+                break
+        if chosen is None or chosen_box is None:
+            chosen = _clamp_point(base, sizes[reference], page_extent)
+            chosen_box = _boxes_at({reference}, {reference: chosen}, old_positions, old_boxes)[
+                reference
+            ]
+        result[reference] = chosen
+        placed_boxes[reference] = chosen_box
+    return result
+
+
+def _cluster_desired_positions(
+    references: set[str],
+    old_positions: dict[str, Point],
+    clusters: list[JsonRecord],
+    hub_positions: dict[str, Point],
+) -> dict[str, Point]:
+    """Arrange owner-attached passives/decouplers around each functional hub."""
+
+    desired = dict(old_positions)
+    offsets = [
+        (0.0, 0.0),
+        (-12.7, -12.7),
+        (0.0, -12.7),
+        (12.7, -12.7),
+        (-12.7, 12.7),
+        (0.0, 12.7),
+        (12.7, 12.7),
+        (-25.4, 0.0),
+        (25.4, 0.0),
+        (-25.4, -12.7),
+        (25.4, -12.7),
+        (-25.4, 12.7),
+        (25.4, 12.7),
+    ]
+    for cluster in sorted(clusters, key=lambda item: str(item["id"])):
+        hub = str(cluster["hub"])
+        if hub not in references:
+            continue
+        center = hub_positions.get(hub, old_positions[hub])
+        desired[hub] = center
+        members = [ref for ref in cluster["members"] if ref != hub]
+        members.sort(key=lambda ref: (not ref.upper().startswith(("C", "R", "L", "D")), ref))
+        for index, reference in enumerate(members, start=1):
+            dx, dy = offsets[index % len(offsets)]
+            desired[reference] = (center[0] + dx, center[1] + dy)
+    return desired
+
+
+def _compact_desired_positions(
+    old_positions: dict[str, Point], page_extent: tuple[float, float]
+) -> dict[str, Point]:
+    xs = [point[0] for point in old_positions.values()]
+    ys = [point[1] for point in old_positions.values()]
+    old_center = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
+    page_center = (page_extent[0] / 2, page_extent[1] / 2)
+    return {
+        reference: (
+            _snap(page_center[0] + (point[0] - old_center[0]) * 0.82),
+            _snap(page_center[1] + (point[1] - old_center[1]) * 0.82),
+        )
+        for reference, point in old_positions.items()
+    }
+
+
+def _candidate_cost(
+    positions: dict[str, Point],
+    *,
+    references: set[str],
+    nets: list[JsonRecord],
+    rails: set[str],
+    old_positions: dict[str, Point],
+    old_boxes: dict[str, Box],
+    label_count: int,
+    page_extent: tuple[float, float],
+) -> tuple[JsonRecord, list[JsonRecord], list[tuple[str, Segment]], list[str]]:
+    topology, segments = _wire_topology(nets, rails, positions)
+    boxes = _boxes_at(references, positions, old_positions, old_boxes)
+    area = _area(boxes)
+    page = Box(0.0, 0.0, page_extent[0], page_extent[1])
+    offsheet = sorted(ref for ref, box in boxes.items() if not box.inside(page, margin_mm=5.0))
+    length = sum(math.dist(start, end) for _, (start, end) in segments)
+    cost = {
+        "symbol_overlaps": _overlap_count(boxes),
+        "wire_crossings": _crossings(segments),
+        "total_manhattan_wire_length_mm": round(length, 4),
+        "label_count": label_count,
+        "label_density_per_1000mm2": round(label_count / max(area, 1) * 1000, 4),
+        "compactness_area_mm2": area,
+    }
+    return cost, topology, segments, offsheet
+
+
+def _score(cost: JsonRecord) -> tuple[int, int, float, float]:
+    return (
+        int(cost["symbol_overlaps"]),
+        int(cost["wire_crossings"]),
+        float(cost["total_manhattan_wire_length_mm"]),
+        float(cost["compactness_area_mm2"]),
+    )
+
+
+def _plan_single_candidate_legacy(
     snapshot: JsonRecord,
     project_dir: str | Path,
     *,
@@ -785,6 +946,468 @@ def plan_schematic_graph_placement(
     }
 
 
+def plan_schematic_graph_placement(
+    snapshot: JsonRecord,
+    project_dir: str | Path,
+    *,
+    sheet: str,
+    fixed_references: list[str] | None = None,
+    candidate_count: int = 6,
+) -> JsonRecord:
+    """Choose the best Pareto-safe candidate, including saved identity."""
+
+    if not 1 <= candidate_count <= 6:
+        raise ValueError("candidate_count must be between 1 and 6")
+    legacy = _plan_single_candidate_legacy(
+        snapshot,
+        project_dir,
+        sheet=sheet,
+        fixed_references=fixed_references,
+    )
+    selected_sheet = legacy["sheet"]
+    source = Path(project_dir).expanduser().resolve() / str(selected_sheet["file"])
+    text = source.read_text(encoding="utf-8", errors="ignore")
+    geometry = parse_schematic_geometry(text)
+    local_components = {
+        str(item["reference"]): item
+        for item in snapshot["schematic"]["components"]
+        if str(item.get("sheet", "")) == str(selected_sheet["name"])
+    }
+    geometry_by_ref = {item.reference: item for item in geometry.symbols}
+    references = set(local_components) & set(geometry_by_ref)
+    old_positions = {
+        reference: (geometry_by_ref[reference].x_mm, geometry_by_ref[reference].y_mm)
+        for reference in references
+    }
+    placed = {
+        item.reference: item for item in parse_placed_symbols(text) if item.reference in references
+    }
+    old_boxes = {
+        reference: placed[reference].extent()
+        if reference in placed
+        else Box.from_center(*old_positions[reference], 5.08, 5.08)
+        for reference in references
+    }
+    sizes = {reference: (box.width, box.height) for reference, box in old_boxes.items()}
+    nets = _local_nets(snapshot, references)
+    rails = _rail_nets(nets, len(references))
+    rank_evidence = legacy["placements"] or legacy["diagnostic_candidate"]["placements"]
+    ranks = {str(item["reference"]): int(item["rank"]) for item in rank_evidence}
+    cluster_for = {str(item["reference"]): str(item["cluster"]) for item in rank_evidence}
+    clusters = list(legacy["functional_clusters"])
+    fixed = set(fixed_references or []) & references
+    page_extent = parse_paper_extent(text)
+    placement_order = sorted(
+        references,
+        key=lambda ref: (
+            ref not in fixed,
+            ranks[ref],
+            cluster_for[ref],
+            old_positions[ref][1],
+            ref,
+        ),
+    )
+    rank_columns = _proposed_positions(
+        references,
+        old_positions,
+        sizes,
+        ranks,
+        cluster_for,
+        fixed,
+        page_extent,
+    )
+    repaired_identity = _repair_positions(
+        old_positions,
+        old_positions=old_positions,
+        old_boxes=old_boxes,
+        sizes=sizes,
+        page_extent=page_extent,
+        order=placement_order,
+        fixed=fixed,
+    )
+    hub_old = {
+        str(cluster["hub"]): old_positions[str(cluster["hub"])]
+        for cluster in clusters
+        if str(cluster["hub"]) in old_positions
+    }
+    owner_hubs = _repair_positions(
+        _cluster_desired_positions(references, old_positions, clusters, hub_old),
+        old_positions=old_positions,
+        old_boxes=old_boxes,
+        sizes=sizes,
+        page_extent=page_extent,
+        order=placement_order,
+        fixed=fixed,
+    )
+    hub_ranked = {
+        str(cluster["hub"]): rank_columns[str(cluster["hub"])]
+        for cluster in clusters
+        if str(cluster["hub"]) in rank_columns
+    }
+    backbone_lanes = _repair_positions(
+        _cluster_desired_positions(references, old_positions, clusters, hub_ranked),
+        old_positions=old_positions,
+        old_boxes=old_boxes,
+        sizes=sizes,
+        page_extent=page_extent,
+        order=placement_order,
+        fixed=fixed,
+    )
+    bounded_compaction = _repair_positions(
+        _compact_desired_positions(old_positions, page_extent),
+        old_positions=old_positions,
+        old_boxes=old_boxes,
+        sizes=sizes,
+        page_extent=page_extent,
+        order=placement_order,
+        fixed=fixed,
+    )
+    repaired_rank_columns = _repair_positions(
+        rank_columns,
+        old_positions=old_positions,
+        old_boxes=old_boxes,
+        sizes=sizes,
+        page_extent=page_extent,
+        order=placement_order,
+        fixed=fixed,
+    )
+    generated = [
+        ("identity", dict(old_positions)),
+        ("local_overlap_repair", repaired_identity),
+        ("owner_hub_clusters", owner_hubs),
+        ("backbone_horizontal_lanes", backbone_lanes),
+        ("bounded_sheet_compaction", bounded_compaction),
+        ("signal_rank_columns", repaired_rank_columns),
+    ][:candidate_count]
+    label_count = len(geometry.labels)
+    evaluated: list[JsonRecord] = []
+    payloads: dict[str, tuple[dict[str, Point], list[JsonRecord]]] = {}
+    for name, positions in generated:
+        cost, topology, _segments, offsheet = _candidate_cost(
+            positions,
+            references=references,
+            nets=nets,
+            rails=rails,
+            old_positions=old_positions,
+            old_boxes=old_boxes,
+            label_count=label_count,
+            page_extent=page_extent,
+        )
+        payloads[name] = (positions, topology)
+        evaluated.append(
+            {
+                "name": name,
+                "cost": cost,
+                "score": list(_score(cost)),
+                "off_sheet_references": offsheet,
+            }
+        )
+    identity = next(item for item in evaluated if item["name"] == "identity")
+    identity_cost = identity["cost"]
+    identity_score = tuple(identity["score"])
+    metric_names = (
+        "symbol_overlaps",
+        "wire_crossings",
+        "total_manhattan_wire_length_mm",
+        "compactness_area_mm2",
+    )
+    for candidate in evaluated:
+        regressions = [
+            metric
+            for metric in metric_names
+            if float(candidate["cost"][metric]) > float(identity_cost[metric]) + 1e-4
+        ]
+        improves = tuple(candidate["score"]) < identity_score
+        eligible = candidate["name"] == "identity" or (
+            not regressions and not candidate["off_sheet_references"] and improves
+        )
+        candidate["eligible"] = eligible
+        candidate["regressions_vs_identity"] = regressions
+        candidate["improves_lexicographically"] = improves
+        candidate["rejection_reasons"] = (
+            []
+            if eligible
+            else [
+                *(["off_sheet"] if candidate["off_sheet_references"] else []),
+                *(["metric_regression"] if regressions else []),
+                *(["no_lexicographic_improvement"] if not improves else []),
+            ]
+        )
+    eligible = [candidate for candidate in evaluated if candidate["eligible"]]
+    selected = min(
+        eligible,
+        key=lambda candidate: (tuple(candidate["score"]), str(candidate["name"])),
+    )
+    selected_name = str(selected["name"])
+    proposed, topology = payloads[selected_name]
+    ranked = sorted(
+        evaluated,
+        key=lambda candidate: (
+            not bool(candidate["eligible"]),
+            tuple(candidate["score"]),
+            str(candidate["name"]),
+        ),
+    )
+    for index, candidate in enumerate(ranked, start=1):
+        candidate["rank"] = index
+        candidate["selected"] = candidate["name"] == selected_name
+    movement = [
+        {
+            "reference": reference,
+            "value": str(local_components[reference].get("value", "")),
+            "rank": ranks[reference],
+            "cluster": cluster_for[reference],
+            "fixed": reference in fixed,
+            "old_mm": list(old_positions[reference]),
+            "proposed_mm": list(proposed[reference]),
+            "delta_mm": [
+                round(proposed[reference][0] - old_positions[reference][0], 4),
+                round(proposed[reference][1] - old_positions[reference][1], 4),
+            ],
+        }
+        for reference in sorted(references, key=lambda ref: (ranks[ref], proposed[ref][1], ref))
+    ]
+    saved_segments = [
+        (f"wire-{index}", segment)
+        for index, segment in enumerate(
+            (
+                (start, end)
+                for wire in geometry.wires
+                for start, end in zip(wire.points, wire.points[1:], strict=False)
+            )
+        )
+    ]
+    identity_selected = selected_name == "identity"
+    constraints = [
+        item
+        for item in legacy["constraints"]
+        if item["code"] not in {"candidate_off_sheet", "cost_regression"}
+    ]
+    return {
+        "schema_version": "1.1",
+        "status": "identity_selected" if identity_selected else "proposal",
+        "read_only": True,
+        "project": legacy["project"],
+        "sheet": selected_sheet,
+        "graph": legacy["graph"],
+        "anchors": legacy["anchors"],
+        "functional_clusters": clusters,
+        "placements": movement,
+        "wire_topology": topology,
+        "ranked_candidates": ranked,
+        "cost": {
+            "authority": {
+                "old_wires": "conceptual component-center topology at saved positions",
+                "new_wires": "same conceptual topology at selected candidate positions",
+            },
+            "saved_schematic_geometry": {
+                "wire_crossings": _crossings(saved_segments),
+                "wire_length_mm": round(
+                    sum(math.dist(start, end) for _, (start, end) in saved_segments), 4
+                ),
+                "note": "observed geometry only; not mixed into optimizer selection",
+            },
+            "old": identity_cost,
+            "new": selected["cost"],
+        },
+        "constraints": constraints,
+        "acceptance": {
+            "accepted": True,
+            "improvement_selected": not identity_selected,
+            "selected_candidate": selected_name,
+            "candidate_count": len(evaluated),
+            "lexicographic_order": list(metric_names),
+            "old_score": list(identity_score),
+            "new_score": list(_score(selected["cost"])),
+            "regressions": [],
+            "selection_reason": (
+                "saved placement is already locally better than every generated alternative"
+                if identity_selected
+                else "selected candidate Pareto-dominates identity and improves lexicographically"
+            ),
+        },
+        "next_bottleneck": (
+            {
+                "kind": "wiring_and_labels",
+                "reason": (
+                    "identity won coordinate search; improve pin-aware routing or label topology "
+                    "before moving symbols"
+                ),
+            }
+            if identity_selected
+            else None
+        ),
+        "future_apply_gate": legacy["future_apply_gate"],
+    }
+
+
+def plan_fresh_schematic_layout(
+    symbols: list[JsonRecord],
+    nets: list[JsonRecord],
+    *,
+    page_extent_mm: tuple[float, float] = (297.0, 210.0),
+    candidate_count: int = 3,
+) -> JsonRecord:
+    """Lay out symbols+nets without saved coordinates for circuit compilation.
+
+    Input symbols require only ``reference``; optional ``width_mm``, ``height_mm``
+    and ``value`` improve geometry. Net nodes use the deep-snapshot node shape.
+    """
+
+    if not 1 <= candidate_count <= 3:
+        raise ValueError("fresh candidate_count must be between 1 and 3")
+    references = {str(symbol["reference"]) for symbol in symbols}
+    if len(references) != len(symbols) or not references:
+        raise ValueError("fresh symbols must have unique non-empty references")
+    normalized_nets: list[JsonRecord] = []
+    for net in nets:
+        nodes = [node for node in net.get("nodes", []) if str(node["reference"]) in references]
+        members = sorted({str(node["reference"]) for node in nodes})
+        if len(members) >= 2:
+            normalized_nets.append({**net, "nodes": nodes, "references": members})
+    ordered_refs = sorted(references)
+    synthetic = {
+        reference: (15.24 + (index % 6) * 25.4, 15.24 + (index // 6) * 20.32)
+        for index, reference in enumerate(ordered_refs)
+    }
+    sizes = {
+        str(symbol["reference"]): (
+            float(symbol.get("width_mm", 7.62)),
+            float(symbol.get("height_mm", 7.62)),
+        )
+        for symbol in symbols
+    }
+    boxes = {
+        reference: Box.from_center(*synthetic[reference], *sizes[reference])
+        for reference in references
+    }
+    rails = _rail_nets(normalized_nets, len(references))
+    arcs, ambiguities = _directed_arcs(references, normalized_nets, rails, synthetic)
+    clusters, cluster_for = _functional_clusters(references, normalized_nets, rails, synthetic)
+    ranks, cycles = _ranks(references, arcs)
+    arc_references = {reference for edge in arcs for reference in edge}
+    cluster_hub = {record["id"]: record["hub"] for record in clusters}
+    for reference in references - arc_references:
+        hub = cluster_hub.get(cluster_for[reference])
+        if hub in arc_references:
+            ranks[reference] = ranks[str(hub)]
+    order = sorted(references, key=lambda ref: (ranks[ref], cluster_for[ref], ref))
+    rank_positions = _repair_positions(
+        _proposed_positions(
+            references,
+            synthetic,
+            sizes,
+            ranks,
+            cluster_for,
+            set(),
+            page_extent_mm,
+        ),
+        old_positions=synthetic,
+        old_boxes=boxes,
+        sizes=sizes,
+        page_extent=page_extent_mm,
+        order=order,
+        fixed=set(),
+    )
+    hub_ranked = {
+        str(cluster["hub"]): rank_positions[str(cluster["hub"])]
+        for cluster in clusters
+        if str(cluster["hub"]) in rank_positions
+    }
+    backbone = _repair_positions(
+        _cluster_desired_positions(references, synthetic, clusters, hub_ranked),
+        old_positions=synthetic,
+        old_boxes=boxes,
+        sizes=sizes,
+        page_extent=page_extent_mm,
+        order=order,
+        fixed=set(),
+    )
+    compact = _repair_positions(
+        _compact_desired_positions(rank_positions, page_extent_mm),
+        old_positions=synthetic,
+        old_boxes=boxes,
+        sizes=sizes,
+        page_extent=page_extent_mm,
+        order=order,
+        fixed=set(),
+    )
+    candidates = [
+        ("fresh_rank_columns", rank_positions),
+        ("fresh_backbone_clusters", backbone),
+        ("fresh_bounded_compaction", compact),
+    ][:candidate_count]
+    evaluated = []
+    payloads = {}
+    for name, positions in candidates:
+        cost, topology, _segments, offsheet = _candidate_cost(
+            positions,
+            references=references,
+            nets=normalized_nets,
+            rails=rails,
+            old_positions=synthetic,
+            old_boxes=boxes,
+            label_count=0,
+            page_extent=page_extent_mm,
+        )
+        payloads[name] = (positions, topology)
+        evaluated.append(
+            {
+                "name": name,
+                "cost": cost,
+                "score": list(_score(cost)),
+                "off_sheet_references": offsheet,
+            }
+        )
+    viable = [item for item in evaluated if not item["off_sheet_references"]]
+    if not viable:
+        raise ValueError("no fresh-layout candidate fits the requested page")
+    selected = min(viable, key=lambda item: (tuple(item["score"]), str(item["name"])))
+    positions, topology = payloads[str(selected["name"])]
+    return {
+        "schema_version": "1.0",
+        "status": "fresh_proposal",
+        "read_only": True,
+        "coordinate_authority": "generated_without_saved_coordinates",
+        "page_extent_mm": list(page_extent_mm),
+        "graph": {
+            "components": len(references),
+            "nets": len(normalized_nets),
+            "directed_arcs": [list(edge) for edge in sorted(arcs)],
+            "rail_nets": sorted(rails),
+            "direction_ambiguities": ambiguities,
+            "feedback_groups": cycles,
+        },
+        "functional_clusters": clusters,
+        "placements": [
+            {
+                "reference": reference,
+                "value": next(
+                    str(symbol.get("value", ""))
+                    for symbol in symbols
+                    if str(symbol["reference"]) == reference
+                ),
+                "rank": ranks[reference],
+                "cluster": cluster_for[reference],
+                "proposed_mm": list(positions[reference]),
+            }
+            for reference in sorted(references, key=lambda ref: (ranks[ref], positions[ref], ref))
+        ],
+        "wire_topology": topology,
+        "ranked_candidates": sorted(
+            evaluated, key=lambda item: (tuple(item["score"]), str(item["name"]))
+        ),
+        "selected_candidate": selected["name"],
+        "cost": selected["cost"],
+        "future_apply_gate": [
+            "instantiate symbols before resolving exact pin anchors",
+            "route around measured instantiated bodies and fields",
+            "prove compiled netlist matches the input graph",
+            "pass ERC and visual QA before promotion",
+        ],
+    }
+
+
 def format_schematic_graph_placement(plan: JsonRecord) -> str:
     """Render the proposal as a compact, stable railway planning report."""
 
@@ -796,16 +1419,12 @@ def format_schematic_graph_placement(plan: JsonRecord) -> str:
         f"sheet={plan['sheet']['name']} read_only=true",
         f"graph parts={graph['components']} nets={graph['nets']} rails={len(graph['rail_nets'])} "
         f"arcs={len(graph['directed_arcs'])} clusters={len(plan['functional_clusters'])}",
-        "RANKS" if plan["acceptance"]["accepted"] else "DIAGNOSTIC RANKS (rejected candidate)",
+        f"SELECTED {plan['acceptance']['selected_candidate']}  "
+        f"candidates={plan['acceptance']['candidate_count']}",
+        "RANKS",
     ]
-    if not plan["acceptance"]["accepted"]:
-        lines.append(
-            "BLOCKED candidate hidden from usable placements; regressions="
-            f"{plan['acceptance']['regressions']}"
-        )
     by_rank: dict[int, list[str]] = {}
-    rank_source = plan["placements"] or plan["diagnostic_candidate"]["placements"]
-    for item in rank_source:
+    for item in plan["placements"]:
         by_rank.setdefault(int(item["rank"]), []).append(str(item["reference"]))
     for rank, references in sorted(by_rank.items()):
         lines.append(f"  {rank}: {' '.join(references)}")
@@ -826,5 +1445,13 @@ def format_schematic_graph_placement(plan: JsonRecord) -> str:
         f"labels {old['label_count']}->{new['label_count']}  "
         f"area {old['compactness_area_mm2']}->{new['compactness_area_mm2']}mm2"
     )
+    lines.append("CANDIDATES")
+    lines.extend(
+        f"  {item['rank']} {item['name']} eligible={str(item['eligible']).lower()} "
+        f"score={item['score']} reasons={item['rejection_reasons']}"
+        for item in plan["ranked_candidates"]
+    )
+    if plan["next_bottleneck"]:
+        lines.append(f"NEXT {plan['next_bottleneck']['kind']}: {plan['next_bottleneck']['reason']}")
     lines.append("REFUSAL pin anchors unresolved; topology is conceptual and cannot be applied")
     return "\n".join(lines)
