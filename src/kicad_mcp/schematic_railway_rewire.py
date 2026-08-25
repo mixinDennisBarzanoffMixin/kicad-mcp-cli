@@ -14,6 +14,7 @@ geometrically plausible line is electrically proven.
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
 import math
 import re
@@ -36,12 +37,16 @@ from .utils.geometry import Box
 type JsonRecord = dict[str, Any]
 type Point = tuple[float, float]
 type Segment = tuple[Point, Point]
+type _RouteState = tuple[Point, int]
 
 _FLOAT = r"-?\d+(?:\.\d+)?"
 _TOLERANCE = 1e-4
 _GRID_MM = 2.54
 _BODY_CLEARANCE_MM = 0.4
 _LABEL_CLEARANCE_MM = 0.2
+_LOCAL_ROUTE_MARGIN_MM = 4 * _GRID_MM
+_BEND_PENALTY_MM = 0.25
+_MAX_LOCAL_AXIS_COORDS = 96
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,6 +354,30 @@ def _normalized_netlist(snapshot: JsonRecord) -> list[JsonRecord]:
     return sorted(records, key=lambda item: (item["name"], item["nodes"]))
 
 
+def _merged_snapshot_nets(snapshot: JsonRecord) -> list[JsonRecord]:
+    """Merge hierarchy-export duplicates before proposing physical edits.
+
+    KiCad's hierarchy snapshot may repeat one logical net as multiple records.
+    That duplication is valid evidence for the connectivity fingerprint, but it
+    must never cause the railway planner to emit the same physical edit twice.
+    """
+
+    nodes_by_name: dict[str, dict[tuple[str, str], JsonRecord]] = {}
+    for net in snapshot["schematic"]["nets"]:
+        name = str(net.get("name", ""))
+        merged = nodes_by_name.setdefault(name, {})
+        for node in net.get("nodes", []):
+            key = (str(node.get("reference", "")), str(node.get("pin", "")))
+            merged.setdefault(key, dict(node))
+    return [
+        {
+            "name": name,
+            "nodes": [nodes[key] for key in sorted(nodes)],
+        }
+        for name, nodes in sorted(nodes_by_name.items())
+    ]
+
+
 def _json_sha256(value: object) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(payload.encode()).hexdigest()
@@ -399,7 +428,8 @@ def _wire_ownership(
         return []
     components = _wire_components(wires)
     names_by_canonical: dict[str, set[str]] = {}
-    for net in snapshot["schematic"]["nets"]:
+    planning_nets = _merged_snapshot_nets(snapshot)
+    for net in planning_nets:
         name = str(net["name"])
         names_by_canonical.setdefault(_canonical_net_name(name), set()).add(name)
     seeds: dict[int, set[str]] = {root: set() for root in set(components)}
@@ -435,7 +465,292 @@ def _deduplicate_segments(segments: Iterable[Segment]) -> tuple[Segment, ...]:
     return tuple(unique[key] for key in sorted(unique))
 
 
-def _route_candidates(anchors: list[Point], obstacles: list[Box]) -> list[tuple[Segment, ...]]:
+def _point_inside_box(point: Point, box: Box) -> bool:
+    return box.x_min < point[0] < box.x_max and box.y_min < point[1] < box.y_max
+
+
+def _merge_safe_path_segments(
+    points: list[Point],
+    *,
+    net_name: str,
+    blocking_boxes: list[Box],
+    existing_wires: list[Segment],
+    ownership: list[_WireOwnership],
+    accepted_other_nets: list[tuple[str, Segment]],
+) -> tuple[Segment, ...]:
+    """Merge collinear A* edges only while the merged edge passes every gate."""
+
+    segments: list[Segment] = []
+    for edge in zip(points, points[1:], strict=False):
+        if not segments:
+            segments.append(edge)
+            continue
+        previous = segments[-1]
+        same_column = (
+            abs(previous[0][0] - previous[1][0]) <= _TOLERANCE
+            and abs(previous[1][0] - edge[1][0]) <= _TOLERANCE
+        )
+        same_row = (
+            abs(previous[0][1] - previous[1][1]) <= _TOLERANCE
+            and abs(previous[1][1] - edge[1][1]) <= _TOLERANCE
+        )
+        merged = (previous[0], edge[1])
+        if (same_column or same_row) and _route_edge_is_safe(
+            merged,
+            net_name=net_name,
+            blocking_boxes=blocking_boxes,
+            existing_wires=existing_wires,
+            ownership=ownership,
+            accepted_other_nets=accepted_other_nets,
+        ):
+            segments[-1] = merged
+        else:
+            segments.append(edge)
+    return _deduplicate_segments(segments)
+
+
+def _local_route_window(anchors: list[Point]) -> Box:
+    xs = [point[0] for point in anchors]
+    ys = [point[1] for point in anchors]
+    span = max(max(xs) - min(xs), max(ys) - min(ys))
+    margin = max(_LOCAL_ROUTE_MARGIN_MM, min(2 * _LOCAL_ROUTE_MARGIN_MM, span / 2))
+    return Box(
+        min(xs) - margin,
+        min(ys) - margin,
+        max(xs) + margin,
+        max(ys) + margin,
+    )
+
+
+def _box_touches(first: Box, second: Box) -> bool:
+    return not (
+        first.x_max < second.x_min
+        or second.x_max < first.x_min
+        or first.y_max < second.y_min
+        or second.y_max < first.y_min
+    )
+
+
+def _segment_touches_box(segment: Segment, box: Box) -> bool:
+    (x1, y1), (x2, y2) = segment
+    return not (
+        max(x1, x2) < box.x_min
+        or min(x1, x2) > box.x_max
+        or max(y1, y2) < box.y_min
+        or min(y1, y2) > box.y_max
+    )
+
+
+def _bounded_axis_coordinates(
+    values: set[float],
+    *,
+    required: set[float],
+    anchor_low: float,
+    anchor_high: float,
+) -> list[float]:
+    """Bound compressed-grid size while preserving anchors and window limits."""
+
+    if len(values) <= _MAX_LOCAL_AXIS_COORDS:
+        return sorted(values)
+    remaining = _MAX_LOCAL_AXIS_COORDS - len(required)
+    if remaining <= 0:
+        return sorted(required)
+
+    def corridor_distance(value: float) -> float:
+        if value < anchor_low:
+            return anchor_low - value
+        if value > anchor_high:
+            return value - anchor_high
+        return 0.0
+
+    optional = sorted(values - required, key=lambda value: (corridor_distance(value), value))
+    return sorted({*required, *optional[:remaining]})
+
+
+def _route_edge_is_safe(
+    segment: Segment,
+    *,
+    net_name: str,
+    blocking_boxes: list[Box],
+    existing_wires: list[Segment],
+    ownership: list[_WireOwnership],
+    accepted_other_nets: list[tuple[str, Segment]],
+) -> bool:
+    if any(_segment_crosses_box(segment, box) for box in blocking_boxes):
+        return False
+    for wire_index, wire in enumerate(existing_wires):
+        kind, _ = _segment_intersection(segment, wire)
+        if kind == "none":
+            continue
+        owner = ownership[wire_index]
+        if owner.net != net_name:
+            return False
+        if kind == "overlap" and not (
+            _point_on_segment(segment[0], wire) and _point_on_segment(segment[1], wire)
+        ):
+            # A partial collinear overlap is electrically plausible but the
+            # existing evaluator intentionally refuses it.  Do not let the
+            # search manufacture a candidate which cannot pass the same gate.
+            return False
+    return not any(
+        _segment_intersection(segment, other_segment)[0] != "none"
+        for _, other_segment in accepted_other_nets
+    )
+
+
+def _bounded_orthogonal_path(
+    anchors: list[Point],
+    *,
+    net_name: str,
+    blocking_boxes: list[Box],
+    existing_wires: list[Segment],
+    ownership: list[_WireOwnership],
+    accepted_other_nets: list[tuple[str, Segment]],
+) -> tuple[Segment, ...] | None:
+    """Find one short local two-pin route on a coordinate-compressed A* grid."""
+
+    if len(anchors) != 2:
+        return None
+    start, goal = anchors
+    window = _local_route_window(anchors)
+    local_boxes = [box for box in blocking_boxes if _box_touches(box, window)]
+    local_wires = [wire for wire in existing_wires if _segment_touches_box(wire, window)]
+    x_values = {start[0], goal[0], window.x_min, window.x_max}
+    y_values = {start[1], goal[1], window.y_min, window.y_max}
+
+    def add_lane(value: float, values: set[float], low: float, high: float) -> None:
+        for candidate in (value - _GRID_MM, value, value + _GRID_MM):
+            if low - _TOLERANCE <= candidate <= high + _TOLERANCE:
+                values.add(round(candidate, 4))
+
+    for box in local_boxes:
+        add_lane(box.x_min, x_values, window.x_min, window.x_max)
+        add_lane(box.x_max, x_values, window.x_min, window.x_max)
+        add_lane(box.y_min, y_values, window.y_min, window.y_max)
+        add_lane(box.y_max, y_values, window.y_min, window.y_max)
+    for wire in local_wires:
+        for point in wire:
+            add_lane(point[0], x_values, window.x_min, window.x_max)
+            add_lane(point[1], y_values, window.y_min, window.y_max)
+
+    required_x = {start[0], goal[0], window.x_min, window.x_max}
+    required_y = {start[1], goal[1], window.y_min, window.y_max}
+    xs = _bounded_axis_coordinates(
+        x_values,
+        required=required_x,
+        anchor_low=min(start[0], goal[0]),
+        anchor_high=max(start[0], goal[0]),
+    )
+    ys = _bounded_axis_coordinates(
+        y_values,
+        required=required_y,
+        anchor_low=min(start[1], goal[1]),
+        anchor_high=max(start[1], goal[1]),
+    )
+    x_index = {value: index for index, value in enumerate(xs)}
+    y_index = {value: index for index, value in enumerate(ys)}
+    points = {
+        (x, y)
+        for x in xs
+        for y in ys
+        if not any(_point_inside_box((x, y), box) for box in local_boxes)
+    }
+    points.update(anchors)
+
+    # Direction is part of the state so equal-length alternatives prefer fewer
+    # bends while remaining stable under repeated runs.
+    start_state: _RouteState = (start, 0)
+    queue: list[tuple[float, int, float, float, float, int, _RouteState]] = [
+        (math.dist(start, goal), 0, 0.0, start[1], start[0], 0, start_state)
+    ]
+    best: dict[_RouteState, tuple[float, int]] = {start_state: (0.0, 0)}
+    previous: dict[_RouteState, _RouteState] = {}
+    final: _RouteState | None = None
+    while queue:
+        _, bends, cost, _, _, _, state = heapq.heappop(queue)
+        point, direction = state
+        if best.get(state) != (cost, bends):
+            continue
+        if _same_point(point, goal):
+            final = state
+            break
+        xi, yi = x_index[point[0]], y_index[point[1]]
+        neighbours: list[tuple[Point, int]] = []
+        if xi:
+            neighbours.append(((xs[xi - 1], point[1]), 1))
+        if xi + 1 < len(xs):
+            neighbours.append(((xs[xi + 1], point[1]), 1))
+        if yi:
+            neighbours.append(((point[0], ys[yi - 1]), 2))
+        if yi + 1 < len(ys):
+            neighbours.append(((point[0], ys[yi + 1]), 2))
+        for neighbour, next_direction in sorted(
+            neighbours, key=lambda item: (item[0][1], item[0][0], item[1])
+        ):
+            if neighbour not in points:
+                continue
+            edge = (point, neighbour)
+            if not _route_edge_is_safe(
+                edge,
+                net_name=net_name,
+                blocking_boxes=local_boxes,
+                existing_wires=existing_wires,
+                ownership=ownership,
+                accepted_other_nets=accepted_other_nets,
+            ):
+                continue
+            bend = int(direction not in {0, next_direction})
+            next_bends = bends + bend
+            next_cost = round(
+                cost + math.dist(point, neighbour) + bend * _BEND_PENALTY_MM,
+                6,
+            )
+            next_state = (neighbour, next_direction)
+            if (next_cost, next_bends) >= best.get(next_state, (math.inf, 2**31)):
+                continue
+            best[next_state] = (next_cost, next_bends)
+            previous[next_state] = state
+            heuristic = abs(neighbour[0] - goal[0]) + abs(neighbour[1] - goal[1])
+            heapq.heappush(
+                queue,
+                (
+                    next_cost + heuristic,
+                    next_bends,
+                    next_cost,
+                    neighbour[1],
+                    neighbour[0],
+                    next_direction,
+                    next_state,
+                ),
+            )
+    if final is None:
+        return None
+    path = [final[0]]
+    while final != start_state:
+        final = previous[final]
+        path.append(final[0])
+    path.reverse()
+    return _merge_safe_path_segments(
+        path,
+        net_name=net_name,
+        blocking_boxes=local_boxes,
+        existing_wires=existing_wires,
+        ownership=ownership,
+        accepted_other_nets=accepted_other_nets,
+    )
+
+
+def _route_candidates(
+    anchors: list[Point],
+    obstacles: list[Box],
+    *,
+    net_name: str,
+    existing_wires: list[Segment],
+    ownership: list[_WireOwnership],
+    label_obstacles: list[tuple[str, str, Box]],
+    removable_label_ids: set[str],
+    accepted_other_nets: list[tuple[str, Segment]],
+) -> list[tuple[Segment, ...]]:
     if len(anchors) < 2:
         return []
     x_values = {point[0] for point in anchors}
@@ -480,6 +795,20 @@ def _route_candidates(anchors: list[Point], obstacles: list[Box]) -> list[tuple[
                 ]
             )
         )
+    blocking_boxes = [
+        *obstacles,
+        *[box for label_id, _, box in label_obstacles if label_id not in removable_label_ids],
+    ]
+    local_path = _bounded_orthogonal_path(
+        anchors,
+        net_name=net_name,
+        blocking_boxes=blocking_boxes,
+        existing_wires=existing_wires,
+        ownership=ownership,
+        accepted_other_nets=accepted_other_nets,
+    )
+    if local_path:
+        candidates.append(local_path)
     unique = {
         _json_sha256([[_point_record(a), _point_record(b)] for a, b in item]): item
         for item in candidates
@@ -702,9 +1031,10 @@ def plan_railway_rewire(
             f"cluster references are not placed on selected page: {', '.join(missing)}"
         )
 
+    planning_nets = _merged_snapshot_nets(snapshot)
     resolved_by_node: dict[tuple[str, str], _ResolvedPin] = {}
     unresolved: list[JsonRecord] = []
-    for net in snapshot["schematic"]["nets"]:
+    for net in planning_nets:
         for node in net.get("nodes", []):
             reference = str(node.get("reference", ""))
             pin = str(node.get("pin", ""))
@@ -728,7 +1058,7 @@ def plan_railway_rewire(
                 resolved_by_node[key] = resolved
 
     all_pin_nets: list[tuple[Point, str]] = []
-    for net in snapshot["schematic"]["nets"]:
+    for net in planning_nets:
         for node in net.get("nodes", []):
             resolved = resolved_by_node.get(
                 (str(node.get("reference", "")).casefold(), str(node.get("pin", "")))
@@ -757,7 +1087,7 @@ def plan_railway_rewire(
     accepted_segments: list[tuple[str, Segment]] = []
     refused_count = 0
     routed_count = 0
-    for net in sorted(snapshot["schematic"]["nets"], key=lambda item: str(item["name"])):
+    for net in planning_nets:
         nodes = [dict(node) for node in net.get("nodes", [])]
         cluster_nodes = [
             node for node in nodes if str(node.get("reference", "")).casefold() in cluster
@@ -861,7 +1191,16 @@ def plan_railway_rewire(
         chosen_junctions: set[Point] = set()
         chosen_retained_label: tuple[str, LabelItem] | None = None
         chosen_added_label_anchor: Point | None = None
-        for candidate in _route_candidates(anchors, [box for _, box in symbol_obstacles]):
+        for candidate in _route_candidates(
+            anchors,
+            [box for _, box in symbol_obstacles],
+            net_name=net_name,
+            existing_wires=wires,
+            ownership=ownership,
+            label_obstacles=label_obstacles,
+            removable_label_ids=removable,
+            accepted_other_nets=accepted_segments,
+        ):
             refusals, covered, junctions = _evaluate_candidate(
                 candidate,
                 net_name=net_name,

@@ -377,3 +377,123 @@ def test_plan_rewire_cli_omitted_refs_passes_whole_sheet_scope(
 
     assert received == ["Logic", None]
     assert json.loads(capsys.readouterr().out) == {"status": "noop", "nets": []}
+
+
+def _local_lane_detour_sheet() -> str:
+    """Two same-net stubs separated by a tall unrelated wire barrier."""
+
+    return """(kicad_sch
+  (version 20250114)
+  (lib_symbols
+    (symbol "Demo:Node"
+      (symbol "Node_1_1"
+        (rectangle (start -1 -1) (end 1 1))
+        (pin passive line
+          (at 2 0 180)
+          (length 1)
+          (name "IO")
+          (number "1")
+        )
+      )
+    )
+  )
+  (symbol
+    (lib_id "Demo:Node")
+    (at 10 10 0)
+    (unit 1)
+    (property "Reference" "A" (at 10 7 0))
+    (property "Value" "Node" (at 10 13 0))
+  )
+  (symbol
+    (lib_id "Demo:Node")
+    (at 20 10 180)
+    (unit 1)
+    (property "Reference" "B" (at 20 7 0))
+    (property "Value" "Node" (at 20 13 0))
+  )
+  (symbol
+    (lib_id "Demo:Node")
+    (at 13 8 0)
+    (unit 1)
+    (property "Reference" "X" (at 13 5 0))
+    (property "Value" "Other" (at 13 11 0))
+  )
+  (wire (pts (xy 12 10) (xy 13 10)))
+  (wire (pts (xy 17 10) (xy 18 10)))
+  (label "SIG" (at 13 10 0))
+  (label "SIG" (at 17 10 0))
+  (wire (pts (xy 15 3) (xy 15 15)))
+  (label "OTHER" (at 15 3 0))
+)
+"""
+
+
+def test_local_obstacle_edge_search_routes_around_unrelated_wire_deterministically(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "logic.kicad_sch"
+    source.write_text(_local_lane_detour_sheet(), encoding="utf-8")
+    snapshot = _snapshot(tmp_path)
+
+    first = plan_railway_rewire(source, snapshot, cluster_refs=["A", "B"])
+    second = plan_railway_rewire(source, snapshot, cluster_refs=["B", "A"])
+
+    first_sig = next(net for net in first["nets"] if net["net"] == "/Logic/SIG")
+    second_sig = next(net for net in second["nets"] if net["net"] == "/Logic/SIG")
+    assert first_sig["status"] == "planned"
+    assert first_sig["selected_operations"] == second_sig["selected_operations"]
+    refusal_codes = {
+        refusal["code"]
+        for candidate in first_sig["candidate_routes"]
+        for refusal in candidate["refusals"]
+    }
+    assert "unrelated_net_crossing" in refusal_codes
+    safe = [candidate for candidate in first_sig["candidate_routes"] if candidate["safe"]]
+    assert len(safe) == 1
+    assert len(safe[0]["segments"]) >= 3
+    assert any(
+        min(segment["start_mm"][1], segment["end_mm"][1]) < 3
+        or max(segment["start_mm"][1], segment["end_mm"][1]) > 15
+        for segment in safe[0]["segments"]
+    )
+    assert first["source"]["unchanged"] is True
+
+
+def test_local_search_detours_unknown_wire_instead_of_relaxing_ownership_gate(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "logic.kicad_sch"
+    source.write_text(
+        _local_lane_detour_sheet()
+        .replace("(xy 15 3) (xy 15 15)", "(xy 16 3) (xy 16 15)")
+        .replace('  (label "OTHER" (at 15 3 0))\n', ""),
+        encoding="utf-8",
+    )
+
+    plan = plan_railway_rewire(source, _snapshot(tmp_path), cluster_refs=["A", "B"])
+
+    sig = next(net for net in plan["nets"] if net["net"] == "/Logic/SIG")
+    assert sig["status"] == "planned"
+    refusal_codes = {
+        refusal["code"]
+        for candidate in sig["candidate_routes"]
+        for refusal in candidate["refusals"]
+    }
+    assert "unknown_wire_crossing" in refusal_codes
+    assert any(candidate["safe"] for candidate in sig["candidate_routes"])
+
+
+def test_duplicate_snapshot_net_records_emit_one_physical_plan(tmp_path: Path) -> None:
+    source = tmp_path / "logic.kicad_sch"
+    source.write_text(_local_lane_detour_sheet(), encoding="utf-8")
+    snapshot = _snapshot(tmp_path)
+    original = snapshot["schematic"]["nets"][0]
+    snapshot["schematic"]["nets"].append(
+        {"name": original["name"], "nodes": list(reversed(original["nodes"]))}
+    )
+
+    plan = plan_railway_rewire(source, snapshot, cluster_refs=["A", "B"])
+
+    sig_plans = [net for net in plan["nets"] if net["net"] == "/Logic/SIG"]
+    assert len(sig_plans) == 1
+    assert sig_plans[0]["status"] == "planned"
