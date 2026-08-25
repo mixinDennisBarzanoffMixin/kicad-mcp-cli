@@ -227,7 +227,7 @@ def test_add_pin_labels_writes_signal_stub_and_target_detail(tmp_path: Path) -> 
 
     assert result == (
         "Reloaded\nTarget schematic: board.kicad_sch\n"
-        "Added 1 pin terminal(s) with stubs:\n"
+        "Added 1 pin terminal(s) with stubs (1 wire segment(s)):\n"
         "U1.1 -> SIG @ (17.08, 20.0)"
     )
     assert len(harness.writes) == 1
@@ -235,6 +235,63 @@ def test_add_pin_labels_writes_signal_stub_and_target_detail(tmp_path: Path) -> 
     assert path == tmp_path / "board.kicad_sch"
     assert "WIRE(12.0,20.0->17.08,20.0)" in content
     assert "LABEL(SIG,17.08,20.0,0,label,None)" in content
+
+
+def test_add_pin_labels_emits_orthogonal_fanout_lane(tmp_path: Path) -> None:
+    harness = _harness(
+        tmp_path,
+        parsed={"uuid": "root", "symbols": [_symbol()], "power_symbols": []},
+        pin_positions={("Device", "R"): {"1": (12.0, 20.0)}},
+        power_net=lambda name: False,
+    )
+
+    result = harness.service.add_pin_labels(
+        [
+            {
+                "reference": "U1",
+                "pin": "1",
+                "net": "SIG",
+                "direction": "right",
+                "fanout_mm": -5.08,
+                "bend_mm": 2.54,
+            }
+        ],
+        stub_mm=5.08,
+        global_labels=False,
+    )
+
+    wires = [payload for name, payload in harness.calls if name == "wire_block"]
+    assert wires == [
+        (12.0, 20.0, 14.54, 20.0),
+        (14.54, 20.0, 14.54, 14.92),
+        (14.54, 14.92, 17.08, 14.92),
+    ]
+    assert "Added 1 pin terminal(s) with stubs (3 wire segment(s)):" in result
+    assert "U1.1 -> SIG @ (17.08, 14.92); fanout -5.08 mm after 2.54 mm" in result
+
+
+@pytest.mark.parametrize("field,value", [("fanout_mm", "sideways"), ("bend_mm", -1)])
+def test_add_pin_labels_rejects_invalid_fanout_geometry(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    harness = _harness(
+        tmp_path,
+        parsed={"uuid": "root", "symbols": [_symbol()], "power_symbols": []},
+        pin_positions={("Device", "R"): {"1": (12.0, 20.0)}},
+        power_net=lambda name: False,
+    )
+
+    connection: dict[str, object] = {
+        "reference": "U1",
+        "pin": "1",
+        "net": "SIG",
+        "direction": "right",
+        field: value,
+    }
+    with pytest.raises(ValueError):
+        harness.service.add_pin_labels([connection])
+
+    assert harness.writes == []
 
 
 def test_add_pin_labels_allows_explicit_stub_direction(tmp_path: Path) -> None:

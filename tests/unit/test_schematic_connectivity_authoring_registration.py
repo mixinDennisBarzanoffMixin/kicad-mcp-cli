@@ -103,10 +103,16 @@ def test_registration_preserves_names_descriptions_and_schemas() -> None:
         "other nets get labels. Pins that share a ``net`` are joined by their\n"
         "common terminal name. This is the clean alternative to placing bare\n"
         "labels directly on pins.\n\n"
-        'A connection may set ``"direction"`` to ``"left"``, ``"right"`,\n'
+        'A connection may set ``"direction"`` to ``"left"``, ``"right"``,\n'
         '``"up"``, or ``"down"`` to override automatic outward-direction\n'
         "inference. This is useful for single-row two-pin devices such as diodes,\n"
         "whose topology is ambiguous without symbol-body geometry.\n\n"
+        "Dense symbols can fan terminals into readable lanes with per-connection\n"
+        '``"fanout_mm"`` and optional ``"bend_mm"`` values. The writer emits an\n'
+        "orthogonal three-segment dogleg while keeping the terminal facing in the\n"
+        "requested direction. Positive fanout is clockwise from that direction\n"
+        "(right -> down, down -> left, left -> up, up -> right), so jq can assign\n"
+        "signed lanes deterministically.\n\n"
         "``label_kind`` selects the emitted label type for non-power nets:\n"
         '``"local"``, ``"global"``, or ``"hierarchical"``. When set it takes\n'
         "precedence over the legacy ``global_labels`` boolean, enabling batch\n"

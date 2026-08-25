@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -325,27 +326,66 @@ class SchematicConnectivityAuthoringService:
                 if requested_direction is not None
                 else (max(stub_mm, 10.16) if uy else stub_mm)
             )
-            ex = round(px + ux * length, 4)
-            ey = round(py + uy * length, 4)
+            fanout_raw = conn.get("fanout_mm", 0.0)
+            bend_raw = conn.get("bend_mm", min(2.54, length))
+            try:
+                fanout_mm = float(fanout_raw)
+                bend_mm = float(bend_raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "fanout_mm and bend_mm must be finite numbers, got "
+                    f"fanout_mm={fanout_raw!r}, bend_mm={bend_raw!r}"
+                ) from exc
+            if not (isfinite(fanout_mm) and isfinite(bend_mm)):
+                raise ValueError(
+                    "fanout_mm and bend_mm must be finite numbers, got "
+                    f"fanout_mm={fanout_raw!r}, bend_mm={bend_raw!r}"
+                )
+            if bend_mm < 0 or bend_mm > length:
+                raise ValueError(
+                    f"bend_mm must be between 0 and the terminal length ({length:g} mm), "
+                    f"got {bend_mm:g}"
+                )
+            # Positive fanout follows the direction's clockwise perpendicular:
+            # right -> down, down -> left, left -> up, up -> right.  This makes
+            # signed lanes deterministic and easy to generate from jq.
+            vx, vy = -uy, ux
+            ex = round(px + ux * length + vx * fanout_mm, 4)
+            ey = round(py + uy * length + vy * fanout_mm, 4)
             stagger_steps = 0
             while stagger_steps < max_stagger_steps and any(
                 abs(ex - qx) < terminal_clearance_mm and abs(ey - qy) < terminal_clearance_mm
                 for qx, qy in occupied_terminals
             ):
                 length += stagger_step_mm
-                ex = round(px + ux * length, 4)
-                ey = round(py + uy * length, 4)
+                ex = round(px + ux * length + vx * fanout_mm, 4)
+                ey = round(py + uy * length + vy * fanout_mm, 4)
                 stagger_steps += 1
             occupied_terminals.append((ex, ey))
-            wire_blocks.append(self.wire_block(px, py, ex, ey))
+            wire_count_before = len(wire_blocks)
+            if fanout_mm:
+                bend_x = round(px + ux * bend_mm, 4)
+                bend_y = round(py + uy * bend_mm, 4)
+                lane_x = round(bend_x + vx * fanout_mm, 4)
+                lane_y = round(bend_y + vy * fanout_mm, 4)
+                route_points = [(px, py), (bend_x, bend_y), (lane_x, lane_y), (ex, ey)]
+                for (x1, y1), (x2, y2) in zip(
+                    route_points, route_points[1:], strict=False
+                ):
+                    if (x1, y1) != (x2, y2):
+                        wire_blocks.append(self.wire_block(x1, y1, x2, y2))
+            else:
+                wire_blocks.append(self.wire_block(px, py, ex, ey))
             suffix = f"; staggered {stagger_steps} step(s)" if stagger_steps else ""
+            if fanout_mm:
+                suffix += f"; fanout {fanout_mm:g} mm after {bend_mm:g} mm"
 
             if self.is_power_net(net):
                 if net not in power_lib_defs:
                     lib_def = self.load_lib_symbol("power", net)
                     if lib_def is None:
                         results.append(f"{ref}.{pin}: power symbol '{net}' was not found")
-                        wire_blocks.pop()
+                        del wire_blocks[wire_count_before:]
                         occupied_terminals.pop()
                         continue
                     power_lib_defs[net] = lib_def
@@ -409,7 +449,9 @@ class SchematicConnectivityAuthoringService:
         self.transactional_write(mutator, target.path)
         return (
             f"{self.reload_schematic()}\n{self.format_target_detail(target)}\n"
-            f"Added {len(wire_blocks)} pin terminal(s) with stubs:\n" + "\n".join(results)
+            f"Added {len(terminal_blocks)} pin terminal(s) with stubs "
+            f"({len(wire_blocks)} wire segment(s)):\n"
+            + "\n".join(results)
         )
 
     def route_wire_between_pins(

@@ -49,6 +49,13 @@ def register(mcp: FastMCP, dependencies: SchematicConnectivityAuthoringDependenc
         inference. This is useful for single-row two-pin devices such as diodes,
         whose topology is ambiguous without symbol-body geometry.
 
+        Dense symbols can fan terminals into readable lanes with per-connection
+        ``"fanout_mm"`` and optional ``"bend_mm"`` values. The writer emits an
+        orthogonal three-segment dogleg while keeping the terminal facing in the
+        requested direction. Positive fanout is clockwise from that direction
+        (right -> down, down -> left, left -> up, up -> right), so jq can assign
+        signed lanes deterministically.
+
         ``label_kind`` selects the emitted label type for non-power nets:
         ``"local"``, ``"global"``, or ``"hierarchical"``. When set it takes
         precedence over the legacy ``global_labels`` boolean, enabling batch
