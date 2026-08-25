@@ -41,6 +41,10 @@ from .deep_inspection import (
     route_plan,
     verification_report,
 )
+from .schematic_graph_placement import (
+    format_schematic_graph_placement,
+    plan_schematic_graph_placement,
+)
 from .schematic_rewire_plan import format_label_compaction_plan, plan_label_compaction
 from .schematic_spatial import schematic_spatial_map
 from .server import build_server
@@ -847,6 +851,20 @@ def build_parser() -> argparse.ArgumentParser:
     compact_labels.add_argument("--radius", type=float, default=35.0, dest="radius_mm")
     compact_labels.add_argument("--format", choices=("json", "text"), default="text")
 
+    plan_schematic = subcommands.add_parser(
+        "plan-schematic",
+        help="dry-run graph-ranked schematic symbol placement and railway wiring",
+    )
+    plan_schematic.add_argument("--sheet", required=True)
+    plan_schematic.add_argument(
+        "--fix",
+        dest="fixed_references",
+        action="append",
+        default=[],
+        help="preserve one symbol center; repeatable",
+    )
+    plan_schematic.add_argument("--format", choices=("json", "text"), default="text")
+
     route = subcommands.add_parser(
         "route", help="plan or apply a conservative PCB route for one net"
     )
@@ -1068,6 +1086,18 @@ def main(argv: Sequence[str] | None = None) -> None:
                 print(json.dumps(report, indent=2, sort_keys=True))
             else:
                 print(format_label_compaction_plan(report))
+            return
+        if args.command == "plan-schematic":
+            report = plan_schematic_graph_placement(
+                project_snapshot(args.project_dir or "."),
+                args.project_dir or ".",
+                sheet=args.sheet,
+                fixed_references=args.fixed_references,
+            )
+            if args.format == "json":
+                print(json.dumps(report, indent=2, sort_keys=True))
+            else:
+                print(format_schematic_graph_placement(report))
             return
         if args.command == "route":
             plan = route_plan(
