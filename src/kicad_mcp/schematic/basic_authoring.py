@@ -220,7 +220,11 @@ class SchematicBasicAuthoringService:
             return self.append_before_sheet_instances(updated, block)
 
         self.transactional_write(mutator, target.path)
-        result = self.reload_schematic()
+        result = (
+            "Child schematic updated; reload it in KiCad if open."
+            if not target.is_root
+            else self.reload_schematic()
+        )
         footprint_warning = self.validate_footprint(footprint or "")
         return "\n".join(
             part
@@ -303,7 +307,11 @@ class SchematicBasicAuthoringService:
             ),
             target.path,
         )
-        result = self.reload_schematic()
+        result = (
+            "Child schematic updated; reload it in KiCad if open."
+            if not target.is_root
+            else self.reload_schematic()
+        )
         return "\n".join(
             part for part in (result, self._format_target_detail(target), snap_note) if part
         )
@@ -338,7 +346,11 @@ class SchematicBasicAuthoringService:
             ),
             target.path,
         )
-        result = self.reload_schematic()
+        result = (
+            "Child schematic updated; reload it in KiCad if open."
+            if not target.is_root
+            else self.reload_schematic()
+        )
         return "\n".join(
             part for part in (result, self._format_target_detail(target), snap_note) if part
         )
@@ -420,7 +432,11 @@ class SchematicBasicAuthoringService:
             ),
             target.path,
         )
-        result = self.reload_schematic()
+        result = (
+            "Child schematic updated; reload it in KiCad if open."
+            if not target.is_root
+            else self.reload_schematic()
+        )
         return "\n".join(
             part for part in (result, self._format_target_detail(target), snap_note) if part
         )

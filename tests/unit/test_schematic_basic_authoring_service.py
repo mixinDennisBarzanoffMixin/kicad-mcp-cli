@@ -213,13 +213,12 @@ def test_add_symbol_preserves_target_write_warnings_and_result_order() -> None:
     )
 
     assert result == (
-        "Reloaded schematic.\n"
+        "Child schematic updated; reload it in KiCad if open.\n"
         "Target schematic (child): Power\n"
         "Grid snap: (10.0, 20.0) -> (10.16, 20.32)\n"
         "Overlap warning: 2 existing item(s).\n"
         "Footprint warning: Resistor_SMD:R_0603"
     )
-    assert reload.calls == 1
     assert transaction.calls[0][0] == Path("Power")
     assert '(symbol "Device:R")' in str(transaction.updated)
     assert "(placed Device:R R1)" in str(transaction.updated)
@@ -237,6 +236,7 @@ def test_add_symbol_preserves_target_write_warnings_and_result_order() -> None:
             "root_uuid": "existing-root",
         }
     ]
+    assert reload.calls == 0
 
 
 def test_add_symbol_inserts_library_definition_into_nonempty_section() -> None:
@@ -340,11 +340,11 @@ def test_add_wire_preserves_snapping_target_and_result_order() -> None:
     service, transaction, reload, _calls = _service()
 
     assert service.add_wire(1.0, 2.0, 4.0, 5.0, True, None, "child.kicad_sch") == (
-        "Reloaded schematic.\n"
+        "Child schematic updated; reload it in KiCad if open.\n"
         "Target schematic (child): child.kicad_sch\n"
         "Grid snap: (1.0, 2.0, 4.0, 5.0) -> (1.27, 2.54, 3.81, 5.08)"
     )
-    assert reload.calls == 1
+    assert reload.calls == 0
     assert transaction.calls[0][0] == Path("child.kicad_sch")
     assert "(wire 1.27 2.54 3.81 5.08)" in str(transaction.updated)
 
@@ -353,11 +353,11 @@ def test_add_label_preserves_justify_target_and_result_order() -> None:
     service, transaction, reload, _calls = _service()
 
     assert service.add_label("VCC", 10.0, 20.0, 90, True, "left", "Power", None) == (
-        "Reloaded schematic.\n"
+        "Child schematic updated; reload it in KiCad if open.\n"
         "Target schematic (child): Power\n"
         "Grid snap: (10.0, 20.0) -> (10.16, 20.32)"
     )
-    assert reload.calls == 1
+    assert reload.calls == 0
     assert transaction.calls[0][0] == Path("Power")
     assert "(label VCC 10.16 20.32 90 None left)" in str(transaction.updated)
 
@@ -429,11 +429,11 @@ def test_add_bus_preserves_snapping_target_and_bus_block() -> None:
     service, transaction, reload, _calls = _service()
 
     assert service.add_bus(1.0, 2.0, 4.0, 5.0, True, "Signals", None) == (
-        "Reloaded schematic.\n"
+        "Child schematic updated; reload it in KiCad if open.\n"
         "Target schematic (child): Signals\n"
         "Grid snap: (1.0, 2.0, 4.0, 5.0) -> (1.27, 2.54, 3.81, 5.08)"
     )
-    assert reload.calls == 1
+    assert reload.calls == 0
     assert transaction.calls[0][0] == Path("Signals")
     assert "(wire 1.27 2.54 3.81 5.08 bus)" in str(transaction.updated)
 
