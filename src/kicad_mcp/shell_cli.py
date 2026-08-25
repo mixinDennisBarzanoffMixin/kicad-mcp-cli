@@ -28,6 +28,7 @@ from typing import Any, Protocol, cast
 from mcp import types as mcp_types
 from pydantic import BaseModel
 
+from .circuit_spec_arrangement import arrange_circuit_spec, format_circuit_spec_arrangement
 from .config import reset_config
 from .connection import get_board
 from .deep_inspection import (
@@ -894,6 +895,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     plan_schematic.add_argument("--format", choices=("json", "text"), default="text")
 
+    arrange_spec = subcommands.add_parser(
+        "arrange-spec",
+        help="fill missing circuit-spec coordinates with a read-only railway layout",
+    )
+    arrange_spec.add_argument("path", help="circuit-spec JSON path, or - for stdin")
+    arrange_spec.add_argument(
+        "--candidates",
+        type=int,
+        choices=range(1, 4),
+        default=3,
+        dest="candidate_count",
+        help="deterministic fresh-layout candidate budget",
+    )
+    arrange_spec.add_argument("--format", choices=("report", "json", "spec"), default="report")
+
     route = subcommands.add_parser(
         "route", help="plan or apply a conservative PCB route for one net"
     )
@@ -1141,6 +1157,26 @@ def main(argv: Sequence[str] | None = None) -> None:
                 print(json.dumps(report, indent=2, sort_keys=True))
             else:
                 print(format_schematic_graph_placement(report))
+            return
+        if args.command == "arrange-spec":
+            if args.path == "-":
+                source = "stdin"
+                spec = _parse_json_object(sys.stdin.read(), source=source)
+            else:
+                path = Path(args.path).expanduser().resolve()
+                source = str(path)
+                spec = _parse_json_object(path.read_text(encoding="utf-8"), source=source)
+            result = arrange_circuit_spec(
+                spec,
+                source=source,
+                candidate_count=args.candidate_count,
+            )
+            if args.format == "spec":
+                print(json.dumps(result["arranged_spec"], indent=2))
+            elif args.format == "json":
+                print(json.dumps(result, indent=2, sort_keys=True))
+            else:
+                print(format_circuit_spec_arrangement(result))
             return
         if args.command == "route":
             plan = route_plan(

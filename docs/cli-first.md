@@ -69,6 +69,31 @@ intentional no-connects from accidental dangling pins, and compares PCB pad nets
 when a synchronized board exists. `verify` bundles source-integrity checks,
 connectivity proof, native KiCad ERC JSON, and hop-over SVG renders.
 
+## Arrange circuit specs
+
+`arrange-spec` is a read-only JSON transformer for circuit specs. It ranks the
+symbols as a railway graph, evaluates bounded deterministic candidates, fills
+only missing `x_mm`/`y_mm` fields, preserves every explicit coordinate, and
+forces `auto_layout=false`. Its `spec` format contains only the original build
+payload plus those coordinate changes; planning evidence stays in `report` and
+`json` formats.
+
+```bash
+kicadq arrange-spec power.json --format report
+kicadq arrange-spec power.json --format json |
+  jq '{selected:.layout.selected_candidate, costs:.layout.ranked_candidates, rails:.layout.graph.rail_nets}'
+jq '.symbols |= map(del(.x_mm,.y_mm))' power.json |
+  kicadq arrange-spec - --format spec > power-arranged.json
+```
+
+Before building, pass the generated fields through the backend analyzer:
+
+```bash
+kicadq arrange-spec power.json --format spec |
+  jq '{symbols,nets,wires,labels,power_symbols,snap_to_grid,auto_layout}' |
+  kicadq -C ./board call sch_analyze_net_compilation --args - --format raw
+```
+
 ## Read-only schematic railway planning
 
 `plan-rewire` resolves exact pin tips from the selected sheet's cached library
