@@ -149,6 +149,18 @@ class FakeBasicAuthoringService:
         self.calls.append(("add_no_connect", args))
         return "no-connect"
 
+    def refresh_symbol_from_library(
+        self,
+        library: str,
+        symbol_name: str,
+        sheet: str | None,
+        sheet_file: str | None,
+    ) -> str:
+        self.calls.append(
+            ("refresh_symbol_from_library", (library, symbol_name, sheet, sheet_file))
+        )
+        return "refreshed"
+
 
 def _registered() -> tuple[FastMCP, FakeBasicAuthoringService]:
     server = FastMCP("schematic-basic-authoring-test")
@@ -164,6 +176,7 @@ def test_registration_preserves_names_descriptions_and_schema_defaults() -> None
     assert set(tools) == {
         "sch_add_symbol",
         "sch_add_component",
+        "sch_refresh_symbol_from_library",
         "sch_add_wire",
         "sch_add_label",
         "sch_add_labels",
@@ -179,6 +192,11 @@ def test_registration_preserves_names_descriptions_and_schema_defaults() -> None
     )
     assert tools["sch_add_component"].description == (
         "Add a schematic component through the hybrid IPC reload path."
+    )
+    assert tools["sch_refresh_symbol_from_library"].description == (
+        "Refresh a sheet's cached symbol definition without moving instances.\n\n"
+        "Use this after a project-local symbol contract changes so placed\n"
+        "instances pick up corrected pins, properties, and graphics.\n"
     )
     assert tools["sch_add_wire"].description == (
         "Add a schematic wire, snapping endpoints to the 1.27 mm / 50 mil grid by default."
@@ -238,6 +256,8 @@ def test_registration_preserves_headless_metadata() -> None:
     assert get_tool_metadata("sch_add_symbol").headless_compatible is True  # type: ignore[union-attr]
     assert get_tool_metadata("sch_add_component") is not None
     assert get_tool_metadata("sch_add_component").headless_compatible is True  # type: ignore[union-attr]
+    assert get_tool_metadata("sch_refresh_symbol_from_library") is not None
+    assert get_tool_metadata("sch_refresh_symbol_from_library").headless_compatible is True  # type: ignore[union-attr]
     assert get_tool_metadata("sch_add_wire") is None
     assert get_tool_metadata("sch_add_label") is None
     assert get_tool_metadata("sch_add_labels") is None
@@ -276,6 +296,26 @@ def test_registration_delegates_symbol_and_component_with_defaults() -> None:
         None,
     )
     assert service.calls == [("add_symbol", expected), ("add_symbol", expected)]
+
+
+def test_registration_delegates_symbol_library_refresh() -> None:
+    server, service = _registered()
+    tools = {tool.name: tool for tool in server._tool_manager.list_tools()}
+
+    assert (
+        tools["sch_refresh_symbol_from_library"].fn(
+            "Flux",
+            "TPD4EUSB30",
+            sheet_file="04_ESP32_USB_Debug.kicad_sch",
+        )
+        == "refreshed"
+    )
+    assert service.calls == [
+        (
+            "refresh_symbol_from_library",
+            ("Flux", "TPD4EUSB30", None, "04_ESP32_USB_Debug.kicad_sch"),
+        )
+    ]
 
 
 def test_registration_delegates_wire_label_alias_and_power_symbol() -> None:

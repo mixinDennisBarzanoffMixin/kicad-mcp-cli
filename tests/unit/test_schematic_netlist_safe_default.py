@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+from kicad_mcp.models.schematic import AddSymbolInput
 from kicad_mcp.tools import schematic as sch
 
 _STATS = {
@@ -78,6 +79,105 @@ def test_build_circuit_default_keeps_routed_wires_opt_in() -> None:
     # Keyword-only defaults live in __kwdefaults__; routed wires must default off.
     kwdefaults = sch._prepare_build_circuit_inputs.__kwdefaults__ or {}
     assert kwdefaults.get("unsafe_routed_wires") is False
+
+
+def test_facing_pin_rows_fall_back_to_labels_directly_on_pins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal stub must never run through a different symbol's pin.
+
+    This reproduces the dense USB-C-to-ESD-array geometry from Flux: opposing
+    pin rows are closer than the normal 5.08 mm terminal stub.  The safe form is
+    a named label directly on each pin, with no copper segment between them.
+    """
+
+    symbols = [
+        AddSymbolInput(
+            library="Test",
+            symbol_name="Facing",
+            reference="U1",
+            value="left",
+            x_mm=50.0,
+            y_mm=50.0,
+        ),
+        AddSymbolInput(
+            library="Test",
+            symbol_name="Facing",
+            reference="U2",
+            value="right",
+            x_mm=60.0,
+            y_mm=50.0,
+        ),
+    ]
+
+    def pin_positions(
+        _library: str,
+        _symbol: str,
+        x_mm: float,
+        _y_mm: float,
+        _rotation: int,
+        _unit: int,
+    ) -> dict[str, tuple[float, float]]:
+        return {"1": (55.0, 50.0)} if x_mm < 55.0 else {"1": (57.54, 50.0)}
+
+    monkeypatch.setattr(sch, "get_pin_positions", pin_positions)
+    monkeypatch.setattr(sch, "get_pin_alias_positions", pin_positions)
+    monkeypatch.setattr(
+        sch,
+        "get_pin_metadata",
+        lambda *_args: {"1": {"name": "IO", "etype": "passive"}},
+    )
+
+    wires, powers, labels, unresolved, stats = sch._plan_netlist_pin_terminals(
+        symbols,
+        [],
+        [],
+        [
+            {"name": "LEFT_NET", "endpoints": ["U1.1"], "scope": "local"},
+            {"name": "RIGHT_NET", "endpoints": ["U2.1"], "scope": "local"},
+        ],
+        False,
+    )
+
+    assert wires == []
+    assert powers == []
+    assert unresolved == []
+    assert stats["resolved_endpoints"] == 2
+    assert [(label["name"], label["x_mm"], label["y_mm"]) for label in labels] == [
+        ("LEFT_NET", 55.0, 50.0),
+        ("RIGHT_NET", 57.54, 50.0),
+    ]
+
+
+def test_intentional_no_connects_resolve_exact_pins_and_reject_wired_pins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    symbol = AddSymbolInput(
+        library="Test",
+        symbol_name="Part",
+        reference="U1",
+        value="part",
+        x_mm=50.0,
+        y_mm=50.0,
+    )
+    monkeypatch.setattr(sch, "get_pin_positions", lambda *_args: {"9": (55.0, 50.0)})
+    monkeypatch.setattr(
+        sch,
+        "get_pin_alias_positions",
+        lambda *_args: {"9": (55.0, 50.0), "NC": (55.0, 50.0)},
+    )
+
+    assert sch._resolve_intentional_no_connects([symbol], [], ["U1.NC"], True) == [
+        (55.0, 50.0)
+    ]
+
+    with pytest.raises(ValueError, match="already assigned to net 'SIGNAL'"):
+        sch._resolve_intentional_no_connects(
+            [symbol],
+            [{"name": "SIGNAL", "endpoints": ["U1.9"]}],
+            ["U1.NC"],
+            True,
+        )
 
 
 def test_net_compilation_report_announces_routing_mode() -> None:

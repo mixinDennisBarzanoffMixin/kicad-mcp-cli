@@ -2476,6 +2476,10 @@ def _normalize_schematic_wire_connectivity(content: str) -> str:
         for segment in segments
         for x, y in ((segment[0], segment[1]), (segment[2], segment[3]))
     }
+    # Detect T attachments while collinear runs are still merged. Splitting the
+    # trunk at the attachment point turns the geometric midpoint into endpoints,
+    # which would otherwise hide the junction from _detect_t_intersections.
+    junction_points = _detect_t_intersections(deduped)
     deduped = _split_wire_segments_at_points(deduped, attachment_points)
     uuid_map: dict[tuple[float, float, float, float], str] = {}
     for w in wires:
@@ -2486,7 +2490,7 @@ def _normalize_schematic_wire_connectivity(content: str) -> str:
     for segment in deduped:
         uid = uuid_map.get(segment)
         updated = _append_before_sheet_instances(updated, wire_block(*segment, uuid_str=uid))
-    return _insert_junctions_for_batch(updated, _detect_t_intersections(deduped))
+    return _insert_junctions_for_batch(updated, junction_points)
 
 
 def _extract_labels(content: str) -> list[dict[str, Any]]:
@@ -3234,7 +3238,10 @@ def _pin_alias_positions(
     fuzzy: dict[str, tuple[float, float]] = {}
     fuzzy_conflicts: set[str] = set()
     for record in _extract_pin_records(block):
-        rx, ry = rotate_point(float(record["x"]), -float(record["y"]), rotation)
+        # KiCad schematic angles rotate clockwise in the screen coordinate
+        # system (Y grows downward). Library symbols use Y-up coordinates, so
+        # invert Y first and then rotate by the negative placed angle.
+        rx, ry = rotate_point(float(record["x"]), -float(record["y"]), -rotation)
         point = (round(sym_x + rx, 4), round(sym_y + ry, 4))
         number = str(record["number"])
         name = str(record["name"])
@@ -3302,7 +3309,7 @@ def get_pin_positions(
     for block in blocks:
         direct_pins = _extract_pin_definitions(_strip_child_symbol_blocks(block))
         for pin_number, (px, py) in direct_pins.items():
-            rx, ry = rotate_point(px, -py, rotation)
+            rx, ry = rotate_point(px, -py, -rotation)
             pins[pin_number] = (round(sym_x + rx, 4), round(sym_y + ry, 4))
 
         block_name = _symbol_block_name(block)
@@ -3316,7 +3323,7 @@ def get_pin_positions(
                 continue
             for pin_number, (px, py) in _extract_pin_definitions(child_block).items():
                 # KiCad's pin (at x y angle) coordinate is the electrical connection point.
-                rx, ry = rotate_point(px, -py, rotation)
+                rx, ry = rotate_point(px, -py, -rotation)
                 pins[pin_number] = (round(sym_x + rx, 4), round(sym_y + ry, 4))
     return pins
 
@@ -3943,6 +3950,62 @@ def _terminal_label_spec(
     return spec
 
 
+def _orthogonal_wire_intersects(
+    first: dict[str, float | bool], second: dict[str, float | bool]
+) -> bool:
+    """Return whether two axis-aligned schematic wires touch or cross."""
+
+    ax1, ay1 = float(first["x1_mm"]), float(first["y1_mm"])
+    ax2, ay2 = float(first["x2_mm"]), float(first["y2_mm"])
+    bx1, by1 = float(second["x1_mm"]), float(second["y1_mm"])
+    bx2, by2 = float(second["x2_mm"]), float(second["y2_mm"])
+    a_vertical = abs(ax1 - ax2) <= SNAP_TOLERANCE_MM
+    b_vertical = abs(bx1 - bx2) <= SNAP_TOLERANCE_MM
+    if a_vertical and b_vertical:
+        return abs(ax1 - bx1) <= SNAP_TOLERANCE_MM and max(
+            min(ay1, ay2), min(by1, by2)
+        ) <= min(max(ay1, ay2), max(by1, by2)) + SNAP_TOLERANCE_MM
+    if not a_vertical and not b_vertical:
+        return abs(ay1 - by1) <= SNAP_TOLERANCE_MM and max(
+            min(ax1, ax2), min(bx1, bx2)
+        ) <= min(max(ax1, ax2), max(bx1, bx2)) + SNAP_TOLERANCE_MM
+    vertical = first if a_vertical else second
+    horizontal = second if a_vertical else first
+    vx = float(vertical["x1_mm"])
+    hy = float(horizontal["y1_mm"])
+    return (
+        min(float(horizontal["x1_mm"]), float(horizontal["x2_mm"]))
+        - SNAP_TOLERANCE_MM
+        <= vx
+        <= max(float(horizontal["x1_mm"]), float(horizontal["x2_mm"]))
+        + SNAP_TOLERANCE_MM
+        and min(float(vertical["y1_mm"]), float(vertical["y2_mm"]))
+        - SNAP_TOLERANCE_MM
+        <= hy
+        <= max(float(vertical["y1_mm"]), float(vertical["y2_mm"]))
+        + SNAP_TOLERANCE_MM
+    )
+
+
+def _point_on_terminal_wire(
+    point: tuple[float, float], wire: dict[str, float | bool]
+) -> bool:
+    px, py = point
+    x1, y1 = float(wire["x1_mm"]), float(wire["y1_mm"])
+    x2, y2 = float(wire["x2_mm"]), float(wire["y2_mm"])
+    if abs(x1 - x2) <= SNAP_TOLERANCE_MM:
+        return (
+            abs(px - x1) <= SNAP_TOLERANCE_MM
+            and min(y1, y2) - SNAP_TOLERANCE_MM <= py <= max(y1, y2) + SNAP_TOLERANCE_MM
+        )
+    if abs(y1 - y2) <= SNAP_TOLERANCE_MM:
+        return (
+            abs(py - y1) <= SNAP_TOLERANCE_MM
+            and min(x1, x2) - SNAP_TOLERANCE_MM <= px <= max(x1, x2) + SNAP_TOLERANCE_MM
+        )
+    return False
+
+
 def _plan_netlist_pin_terminals(
     symbols: list[AddSymbolInput],
     powers: list[PowerSymbolInput],
@@ -4016,6 +4079,11 @@ def _plan_netlist_pin_terminals(
         label_points.setdefault(label.name, (x, y))
 
     terminal_wires: list[dict[str, float | bool]] = []
+    all_symbol_pin_points = {
+        _point_key(*point)
+        for points in symbol_points.values()
+        for point in points.values()
+    }
     terminal_labels: list[dict[str, Any]] = []
     terminal_powers: list[dict[str, Any]] = []
     unresolved_nets: list[dict[str, Any]] = []
@@ -4115,6 +4183,29 @@ def _plan_netlist_pin_terminals(
             stub = _terminal_stub_length(net_name)
             ex = round(point[0] + ux * stub, 4)
             ey = round(point[1] + uy * stub, 4)
+            candidate_wire: dict[str, float | bool] = {
+                "x1_mm": point[0],
+                "y1_mm": point[1],
+                "x2_mm": ex,
+                "y2_mm": ey,
+                "snap_to_grid": False,
+            }
+            # A terminal stub is optional; the label anchor itself can attach
+            # directly to a pin. Fall back to that zero-length form whenever a
+            # long stub would touch any other pin or an already accepted stub.
+            # This is especially important for USB connectors/ESD arrays whose
+            # facing pin rows may be only one grid interval apart.
+            crosses_other_pin = any(
+                other != pin_key and _point_on_terminal_wire(other, candidate_wire)
+                for other in all_symbol_pin_points
+            )
+            crosses_existing_stub = any(
+                _orthogonal_wire_intersects(candidate_wire, existing)
+                for existing in terminal_wires
+            )
+            emit_stub = not crosses_other_pin and not crosses_existing_stub
+            if not emit_stub:
+                ex, ey = point
             net_terminal_max_y = max(net_terminal_max_y, ey)
             end_key = _point_key(ex, ey)
             existing_terminal_net = terminal_points.get(end_key)
@@ -4128,15 +4219,8 @@ def _plan_netlist_pin_terminals(
                 continue
             terminal_points[end_key] = net_name
 
-            terminal_wires.append(
-                {
-                    "x1_mm": point[0],
-                    "y1_mm": point[1],
-                    "x2_mm": ex,
-                    "y2_mm": ey,
-                    "snap_to_grid": False,
-                }
-            )
+            if emit_stub:
+                terminal_wires.append(candidate_wire)
             rotation = _terminal_rotation_from_vector(ux, uy)
             # An explicit scope is authoritative.  In particular, a global
             # power rail on a child sheet must remain a global label: emitting
@@ -4317,6 +4401,103 @@ def _plan_netlist_wires(
     return routed_segments, unresolved_nets, resolution_stats
 
 
+def _resolve_intentional_no_connects(
+    symbols: list[AddSymbolInput],
+    nets: list[dict[str, Any]],
+    endpoints: list[str],
+    snap_to_grid: bool,
+) -> list[tuple[float, float]]:
+    """Resolve ``REF.PIN`` declarations to safe KiCad no-connect coordinates.
+
+    Endpoint names are resolved through the same exact pin-number/name aliases
+    used by net compilation.  A declaration is rejected when it is missing,
+    ambiguous by geometry, duplicated, or also assigned to a net; silently
+    placing an NC marker at a symbol origin would make ERC evidence meaningless.
+    """
+
+    symbol_points: dict[str, dict[str, tuple[float, float]]] = {}
+    symbol_pin_aliases: dict[str, dict[str, tuple[float, float]]] = {}
+    symbol_centers: dict[str, tuple[float, float]] = {}
+    for symbol in symbols:
+        x, y = _snap_point(symbol.x_mm, symbol.y_mm, snap_to_grid and symbol.snap_to_grid)
+        symbol_centers[symbol.reference] = (x, y)
+        symbol_points[symbol.reference] = get_pin_positions(
+            symbol.library,
+            symbol.symbol_name,
+            x,
+            y,
+            symbol.rotation,
+            symbol.unit,
+        )
+        symbol_pin_aliases[symbol.reference] = get_pin_alias_positions(
+            symbol.library,
+            symbol.symbol_name,
+            x,
+            y,
+            symbol.rotation,
+            symbol.unit,
+        )
+
+    connected_points: dict[tuple[float, float], str] = {}
+    for net in nets:
+        net_name = _net_name(net)
+        for endpoint in _net_endpoints(net):
+            if _endpoint_reference(endpoint) is None:
+                continue
+            point, _reason, resolution_kind = _resolve_net_endpoint(
+                endpoint,
+                net_name,
+                symbol_points,
+                symbol_pin_aliases,
+                symbol_centers,
+                {},
+                {},
+            )
+            if point is not None and resolution_kind != "symbol_center":
+                connected_points[_point_key(*point)] = net_name
+
+    resolved: list[tuple[float, float]] = []
+    seen_points: dict[tuple[float, float], str] = {}
+    failures: list[str] = []
+    for endpoint_text in endpoints:
+        endpoint = _normalize_net_endpoint(endpoint_text)
+        if _endpoint_reference(endpoint) is None or _endpoint_pin(endpoint) is None:
+            failures.append(f"{endpoint_text}: expected an exact REF.PIN endpoint")
+            continue
+        point, reason, resolution_kind = _resolve_net_endpoint(
+            endpoint,
+            "",
+            symbol_points,
+            symbol_pin_aliases,
+            symbol_centers,
+            {},
+            {},
+        )
+        if point is None or resolution_kind == "symbol_center":
+            failures.append(f"{endpoint_text}: {reason or 'pin could not be resolved'}")
+            continue
+        key = _point_key(*point)
+        if key in connected_points:
+            failures.append(
+                f"{endpoint_text}: pin is already assigned to net '{connected_points[key]}'"
+            )
+            continue
+        previous = seen_points.get(key)
+        if previous is not None:
+            failures.append(
+                f"{endpoint_text}: resolves to the same pin coordinate as '{previous}'"
+            )
+            continue
+        seen_points[key] = endpoint_text
+        resolved.append(key)
+
+    if failures:
+        raise ValueError(
+            "Intentional no-connect declarations failed validation: " + "; ".join(failures)
+        )
+    return resolved
+
+
 def _prepare_build_circuit_inputs(
     *,
     symbols: list[dict[str, Any]] | None = None,
@@ -4324,6 +4505,7 @@ def _prepare_build_circuit_inputs(
     labels: list[dict[str, Any]] | None = None,
     power_symbols: list[dict[str, Any]] | None = None,
     nets: list[dict[str, Any]] | None = None,
+    intentional_no_connect_endpoints: list[str] | None = None,
     snap_to_grid: bool = True,
     auto_layout: bool = False,
     unsafe_routed_wires: bool = False,
@@ -4339,6 +4521,7 @@ def _prepare_build_circuit_inputs(
     list[dict[str, Any]],
     dict[str, int],
     str,
+    list[tuple[float, float]],
 ]:
     if max_paper not in _PAPER_LADDER:
         raise ValueError(
@@ -4429,6 +4612,13 @@ def _prepare_build_circuit_inputs(
             )
         validated_wires.extend(AddWireInput.model_validate(item) for item in generated_wires)
 
+    intentional_no_connects = _resolve_intentional_no_connects(
+        validated_symbols,
+        raw_nets,
+        list(intentional_no_connect_endpoints or []),
+        snap_to_grid,
+    )
+
     return (
         validated_symbols,
         validated_powers,
@@ -4439,6 +4629,7 @@ def _prepare_build_circuit_inputs(
         unresolved_nets,
         resolution_stats,
         chosen_paper,
+        intentional_no_connects,
     )
 
 
@@ -5995,6 +6186,7 @@ def _prepare_circuit_compilation_inputs(
     labels: list[dict[str, Any]] | None = None,
     power_symbols: list[dict[str, Any]] | None = None,
     nets: list[dict[str, Any]] | None = None,
+    intentional_no_connect_endpoints: list[str] | None = None,
     snap_to_grid: bool = True,
     auto_layout: bool = False,
     unsafe_routed_wires: bool = False,
@@ -6007,6 +6199,7 @@ def _prepare_circuit_compilation_inputs(
         labels=labels,
         power_symbols=power_symbols,
         nets=nets,
+        intentional_no_connect_endpoints=intentional_no_connect_endpoints,
         snap_to_grid=snap_to_grid,
         auto_layout=auto_layout,
         unsafe_routed_wires=unsafe_routed_wires,
@@ -6023,6 +6216,7 @@ def _prepare_circuit_compilation_inputs(
         unresolved_nets=prepared[6],
         resolution_stats=prepared[7],
         chosen_paper=prepared[8],
+        intentional_no_connects=prepared[9],
     )
 
 
@@ -6228,6 +6422,7 @@ def _register_inspection_and_analysis(mcp: FastMCP) -> None:
         label_block=lambda name, x, y, rotation, **kwargs: label_block(
             name, x, y, rotation, **kwargs
         ),
+        no_connect_block=no_connect_block,
         normalize_connectivity=lambda content: _normalize_schematic_wire_connectivity(content),
         validate_schematic_text=lambda content: _validate_schematic_text(content),
         transactional_write=_write_compiled_schematic,

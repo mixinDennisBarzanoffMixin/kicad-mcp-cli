@@ -14,16 +14,36 @@ class FakeDestructiveEditService:
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[object, ...]]] = []
 
-    def delete_wire(self, wire_id: str) -> str:
-        self.calls.append(("delete_wire", (wire_id,)))
+    def delete_wire(
+        self,
+        wire_id: str,
+        *,
+        sheet: str | None,
+        sheet_file: str | None,
+    ) -> str:
+        self.calls.append(("delete_wire", (wire_id, sheet, sheet_file)))
         return "wire-deleted"
 
-    def delete_symbol(self, reference: str) -> str:
-        self.calls.append(("delete_symbol", (reference,)))
+    def delete_symbol(
+        self,
+        reference: str,
+        *,
+        sheet: str | None,
+        sheet_file: str | None,
+    ) -> str:
+        self.calls.append(("delete_symbol", (reference, sheet, sheet_file)))
         return "symbol-deleted"
 
-    def delete_label(self, name: str, x_mm: float, y_mm: float) -> str:
-        self.calls.append(("delete_label", (name, x_mm, y_mm)))
+    def delete_label(
+        self,
+        name: str,
+        x_mm: float,
+        y_mm: float,
+        *,
+        sheet: str | None,
+        sheet_file: str | None,
+    ) -> str:
+        self.calls.append(("delete_label", (name, x_mm, y_mm, sheet, sheet_file)))
         return "label-deleted"
 
     def delete_no_connect(self, x_mm: float, y_mm: float) -> str:
@@ -79,10 +99,10 @@ def test_registration_preserves_names_descriptions_and_schemas() -> None:
         "sch_modify_label",
     }
     assert tools["sch_delete_wire"].description == (
-        "Remove a specific wire segment using its UUID or unique UUID prefix."
+        "Remove a wire by UUID from the root or selected child sheet."
     )
     assert tools["sch_delete_symbol"].description == (
-        "Remove a placed symbol and any directly attached wire segments."
+        "Remove a symbol and attached wires from the root or selected child sheet."
     )
     assert tools["sch_delete_label"].description == (
         "Delete label(s) (local/global/hierarchical) matching ``name`` at the\n"
@@ -139,9 +159,9 @@ def test_registration_delegates_exact_arguments() -> None:
     assert tools["sch_move_label"].fn("VCC", 1.0, 2.0, 3.0, 4.0, 90, True) == ("label-moved")
     assert tools["sch_modify_label"].fn("VCC", 3.0, 4.0, "left top") == ("label-modified")
     assert service.calls == [
-        ("delete_wire", ("abc",)),
-        ("delete_symbol", ("R1",)),
-        ("delete_label", ("VCC", 1.0, 2.0)),
+        ("delete_wire", ("abc", None, None)),
+        ("delete_symbol", ("R1", None, None)),
+        ("delete_label", ("VCC", 1.0, 2.0, None, None)),
         ("delete_no_connect", (1.0, 2.0)),
         ("move_label", ("VCC", 1.0, 2.0, 3.0, 4.0, 90, True)),
         ("modify_label", ("VCC", 3.0, 4.0, "left top")),

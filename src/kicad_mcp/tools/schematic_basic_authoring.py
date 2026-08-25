@@ -54,6 +54,33 @@ def _add_labels_batch(
     return service.add_labels_batch(resolved, sheet, sheet_file)
 
 
+def _register_symbol_refresh(
+    mcp: FastMCP,
+    service: SchematicBasicAuthoringService,
+) -> None:
+    """Register the embedded-library refresh primitive outside the main adapter."""
+
+    @mcp.tool()
+    @headless_compatible
+    def sch_refresh_symbol_from_library(
+        library: str,
+        symbol_name: str,
+        sheet: str | None = None,
+        sheet_file: str | None = None,
+    ) -> str:
+        """Refresh a sheet's cached symbol definition without moving instances.
+
+        Use this after a project-local symbol contract changes so placed
+        instances pick up corrected pins, properties, and graphics.
+        """
+        return service.refresh_symbol_from_library(
+            library,
+            symbol_name,
+            sheet,
+            sheet_file,
+        )
+
+
 def register(mcp: FastMCP, dependencies: SchematicBasicAuthoringDependencies) -> None:
     """Register basic schematic symbol, wire, and label authoring tools."""
     service = dependencies.service
@@ -166,26 +193,7 @@ def register(mcp: FastMCP, dependencies: SchematicBasicAuthoringDependencies) ->
             sheet_file,
         )
 
-    @mcp.tool()
-    @headless_compatible
-    def sch_refresh_symbol_from_library(
-        library: str,
-        symbol_name: str,
-        sheet: str | None = None,
-        sheet_file: str | None = None,
-    ) -> str:
-        """Refresh a sheet's cached symbol definition without moving instances.
-
-        KiCad schematics embed library symbols. Use this after a project-local
-        symbol contract changes so existing placed instances pick up corrected
-        pins, properties, and graphics.
-        """
-        return service.refresh_symbol_from_library(
-            library,
-            symbol_name,
-            sheet,
-            sheet_file,
-        )
+    _register_symbol_refresh(mcp, service)
 
     @mcp.tool()
     def sch_add_wire(

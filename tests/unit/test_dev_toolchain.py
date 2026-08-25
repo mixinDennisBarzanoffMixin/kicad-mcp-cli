@@ -30,7 +30,7 @@ def test_toolchain_contract_is_exact_and_cross_file_consistent() -> None:
     assert (ROOT / ".python-version").read_text(encoding="utf-8").strip() == contract.python_version
     assert package["packageManager"] == f"pnpm@{contract.pnpm_version}"
     assert package["engines"]["node"].startswith(f">={contract.node_version} ")
-    assert uv_config["required-version"] == contract.uv_version
+    assert uv_config["required-version"] == f">={contract.uv_version},<0.13"
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     workflow = (ROOT / ".github" / "workflows" / "dev-bootstrap.yml").read_text(encoding="utf-8")
     assert f"ARG UV_VERSION={contract.uv_version}" in dockerfile

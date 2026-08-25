@@ -6,10 +6,19 @@ import json
 from pathlib import Path
 
 from kicad_mcp.schematic_railway_rewire import (
+    _Placed,
+    _transform_point,
     format_railway_rewire_plan,
     plan_railway_rewire,
 )
 from kicad_mcp.shell_cli import build_parser, main
+
+
+def test_cached_pin_transform_matches_kicad_clockwise_rotation() -> None:
+    placed = _Placed("R1", "Device:R", 100.0, 100.0, 90, 1, "")
+
+    assert _transform_point((0.0, 3.81), placed) == (96.19, 100.0)
+    assert _transform_point((0.0, -3.81), placed) == (103.81, 100.0)
 
 
 def _sheet(*, unrelated_crossing: bool = False, local_labels: bool = True) -> str:

@@ -98,6 +98,20 @@ def test_spec_payload_contains_no_planning_diagnostics() -> None:
     assert payload["nets"] == _spec()["nets"]
 
 
+def test_reflow_replaces_saved_coordinates_without_mutating_source() -> None:
+    spec = _spec()
+    old_j1 = (spec["symbols"][0]["x_mm"], spec["symbols"][0]["y_mm"])  # type: ignore[index]
+
+    result = arrange_circuit_spec(spec, respect_anchors=False)
+    arranged_j1 = result["arranged_spec"]["symbols"][0]
+
+    assert (arranged_j1["x_mm"], arranged_j1["y_mm"]) != old_j1
+    assert result["summary"]["respect_anchors"] is False
+    assert result["summary"]["generated_symbols"] == 4
+    assert result["anchors"]["honored"] is False
+    assert (spec["symbols"][0]["x_mm"], spec["symbols"][0]["y_mm"]) == old_j1  # type: ignore[index]
+
+
 def test_json_diagnostics_expose_candidates_ranks_and_rails() -> None:
     result = arrange_circuit_spec(_spec(), candidate_count=2)
 
@@ -127,12 +141,13 @@ def test_cli_spec_mode_reads_stdin_and_emits_only_build_payload(
 
 def test_cli_parser_exposes_pipe_and_candidate_controls() -> None:
     args = build_parser().parse_args(
-        ["arrange-spec", "-", "--format", "json", "--candidates", "2"]
+        ["arrange-spec", "-", "--format", "json", "--candidates", "2", "--reflow"]
     )
 
     assert args.path == "-"
     assert args.format == "json"
     assert args.candidate_count == 2
+    assert args.reflow is True
     assert not hasattr(args, "apply")
 
 

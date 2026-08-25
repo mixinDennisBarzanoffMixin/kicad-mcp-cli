@@ -68,6 +68,7 @@ class CompilationHarness:
             wire_block=lambda x1, y1, x2, y2: f"WIRE:{x1},{y1}->{x2},{y2}",
             snap_line=lambda x1, y1, x2, y2, enabled: (x1, y1, x2, y2),
             label_block=self.label_block,
+            no_connect_block=lambda x, y: f"NO_CONNECT:{x},{y}",
             normalize_connectivity=self.normalize_connectivity,
             validate_schematic_text=self.validate_schematic_text,
             transactional_write=self.transactional_write,
@@ -88,6 +89,7 @@ class CompilationHarness:
         labels: list[dict[str, Any]] | None = None,
         power_symbols: list[dict[str, Any]] | None = None,
         nets: list[dict[str, Any]] | None = None,
+        intentional_no_connect_endpoints: list[str] | None = None,
         snap_to_grid: bool = True,
         auto_layout: bool = False,
         unsafe_routed_wires: bool = False,
@@ -101,6 +103,7 @@ class CompilationHarness:
                 "labels": labels,
                 "power_symbols": power_symbols,
                 "nets": nets,
+                "intentional_no_connect_endpoints": intentional_no_connect_endpoints,
                 "snap_to_grid": snap_to_grid,
                 "auto_layout": auto_layout,
                 "unsafe_routed_wires": unsafe_routed_wires,
@@ -266,6 +269,7 @@ def test_analyze_delegates_preparation_and_report_arguments(tmp_path: Path) -> N
             "labels": None,
             "power_symbols": None,
             "nets": [{"name": "NET"}],
+            "intentional_no_connect_endpoints": None,
             "snap_to_grid": True,
             "auto_layout": True,
             "unsafe_routed_wires": True,
@@ -396,6 +400,7 @@ def test_build_deduplicates_libraries_and_generates_all_element_types(tmp_path: 
             "symbol_center_resolutions": 0,
         },
         chosen_paper="A4",
+        intentional_no_connects=[(7.0, 8.0)],
     )
 
     harness.service().build(snap_to_grid=False)
@@ -408,6 +413,7 @@ def test_build_deduplicates_libraries_and_generates_all_element_types(tmp_path: 
     assert "reference=#PWR001" in content and "reference=#PWR002" in content
     assert "WIRE:1.0,2.0->3.0,4.0" in content
     assert "LABEL:NET_A,3.0,4.0,90,True,input,None" in content
+    assert "NO_CONNECT:7.0,8.0" in content
     assert "project_name=demo-project" in content
 
 

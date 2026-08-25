@@ -72,6 +72,31 @@ def _directed_arcs(
         for reference in net["references"]:
             nets_by_reference[reference].add(str(net["name"]))
 
+    # Untyped circuit specs still contain useful topology.  Compute each part's
+    # shortest non-rail hop distance from an external connector, then use that
+    # only as a deterministic fallback when electrical pin types cannot orient a
+    # net.  This yields the natural J -> protection -> series link -> IC railway
+    # without pretending passive/bidirectional pins have authoritative direction.
+    flow_adjacency = {reference: set() for reference in references}
+    for net in nets:
+        if str(net["name"]) in rails:
+            continue
+        members = list(net["references"])
+        for reference in members:
+            flow_adjacency[reference].update(item for item in members if item != reference)
+    flow_distance: dict[str, int] = {}
+    flow_queue = deque(
+        sorted(reference for reference in references if _CONNECTOR_REF.match(reference))
+    )
+    for reference in flow_queue:
+        flow_distance[reference] = 0
+    while flow_queue:
+        current = flow_queue.popleft()
+        for neighbor in sorted(flow_adjacency[current]):
+            if neighbor not in flow_distance:
+                flow_distance[neighbor] = flow_distance[current] + 1
+                flow_queue.append(neighbor)
+
     def decoupling_attachment(reference: str) -> bool:
         attached = nets_by_reference[reference]
         return reference.upper().startswith("C") and any(_is_ground(name) for name in attached)
@@ -130,6 +155,62 @@ def _directed_arcs(
                     }
                 )
         else:
+            if name in rails:
+                ambiguities.append(
+                    {
+                        "net": name,
+                        "code": "untyped_rail_direction_ignored",
+                        "references": net["references"],
+                        "reason": "shared rail does not impose passive signal-flow order",
+                    }
+                )
+                continue
+            connector_sources = sorted(
+                reference for reference in net["references"] if _CONNECTOR_REF.match(reference)
+            )
+            if connector_sources:
+                arcs.update(
+                    (source, target)
+                    for source in connector_sources
+                    for target in net["references"]
+                    if source != target
+                )
+                ambiguities.append(
+                    {
+                        "net": name,
+                        "code": "connector_flow_inference",
+                        "references": net["references"],
+                        "reason": "untyped net flows outward from an external connector",
+                    }
+                )
+                continue
+
+            known_distances = {
+                reference: flow_distance[reference]
+                for reference in net["references"]
+                if reference in flow_distance
+            }
+            if len(set(known_distances.values())) >= 2:
+                near = min(known_distances.values())
+                far = max(known_distances.values())
+                arcs.update(
+                    (source, target)
+                    for source, source_distance in known_distances.items()
+                    for target, target_distance in known_distances.items()
+                    if source_distance == near and target_distance == far and source != target
+                )
+                ambiguities.append(
+                    {
+                        "net": name,
+                        "code": "connector_distance_flow_inference",
+                        "references": net["references"],
+                        "reason": (
+                            "untyped net follows shortest non-rail distance from a connector"
+                        ),
+                    }
+                )
+                continue
+
             series = [ref for ref in net["references"] if series_candidate(ref)]
             if len(series) >= 2:
                 ordered = sorted(
@@ -351,20 +432,20 @@ def _proposed_positions(
             (ref for ref in references if ranks[ref] == rank),
             key=lambda ref: (cluster_for.get(ref, ref), old[ref][1], ref),
         )
-        cursor_y = origin_y
-        previous_half = 0.0
+        gap = 2.54
+        total_height = sum(sizes.get(reference, (5.08, 5.08))[1] for reference in members)
+        total_height += gap * max(0, len(members) - 1)
+        cursor_y = max(origin_y, (_page_height - total_height) / 2.0)
         for reference in members:
-            if reference in fixed:
-                proposed[reference] = old[reference]
-                continue
             height = sizes.get(reference, (5.08, 5.08))[1]
             half = height / 2
-            cursor_y = max(
-                cursor_y + previous_half + half + 2.54,
-                origin_y + half,
-            )
-            proposed[reference] = (_snap(origin_x + rank * column_spacing), _snap(cursor_y))
-            previous_half = half
+            if reference in fixed:
+                proposed[reference] = old[reference]
+                cursor_y += height + gap
+                continue
+            center_y = cursor_y + half
+            proposed[reference] = (_snap(origin_x + rank * column_spacing), _snap(center_y))
+            cursor_y += height + gap
     return proposed
 
 
@@ -518,14 +599,20 @@ def _clamp_point(
     margin_mm: float = 5.0,
 ) -> Point:
     half_width, half_height = size[0] / 2, size[1] / 2
+    min_x, max_x = margin_mm + half_width, page_extent[0] - margin_mm - half_width
+    min_y, max_y = margin_mm + half_height, page_extent[1] - margin_mm - half_height
+
+    def bounded_grid(value: float, lower: float, upper: float) -> float:
+        snapped = _snap(min(max(value, lower), upper))
+        if snapped < lower:
+            snapped = math.ceil(lower / _GRID_MM) * _GRID_MM
+        if snapped > upper:
+            snapped = math.floor(upper / _GRID_MM) * _GRID_MM
+        return round(snapped, 4)
+
     return (
-        _snap(min(max(point[0], margin_mm + half_width), page_extent[0] - margin_mm - half_width)),
-        _snap(
-            min(
-                max(point[1], margin_mm + half_height),
-                page_extent[1] - margin_mm - half_height,
-            )
-        ),
+        bounded_grid(point[0], min_x, max_x),
+        bounded_grid(point[1], min_y, max_y),
     )
 
 
@@ -1389,6 +1476,7 @@ def plan_fresh_schematic_layout(
                 ),
                 "rank": ranks[reference],
                 "cluster": cluster_for[reference],
+                "size_mm": list(sizes[reference]),
                 "proposed_mm": list(positions[reference]),
             }
             for reference in sorted(references, key=lambda ref: (ranks[ref], positions[ref], ref))

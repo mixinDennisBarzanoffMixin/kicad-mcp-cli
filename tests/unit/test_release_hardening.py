@@ -17,6 +17,7 @@ from kicad_mcp.config import get_config, reset_config
 from kicad_mcp.discovery import CliCapabilities
 from kicad_mcp.server import CLI_FAILURE_TOOL_NAMES, HEAVY_TOOL_NAMES, build_server
 from scripts.check_github_actions_policy import has_sha_pinned_action
+from scripts.dev_environment import load_toolchain_contract
 from tests.conftest import call_tool_text
 
 EXPOSED_HOST = "0." + "0.0.0"
@@ -755,12 +756,10 @@ def test_docker_metadata_contains_mcp_oci_label_and_release_image_contract() -> 
         pytest.skip("Standalone repo: publish workflows not present")
     registry_workflow = _workflow("publish-mcp-registry.yml")
     container_workflow = _workflow("publish-mcp-container.yml")
-    uv_toml = (root / "uv.toml").read_text(encoding="utf-8")
     docker_install = (root / "docs" / "install" / "docker.md").read_text(encoding="utf-8")
     publishing = (root / "docs" / "publishing.md").read_text(encoding="utf-8")
     deployment = (root / "docs" / "deployment" / "docker.md").read_text(encoding="utf-8")
-    uv_version = tomllib.loads(uv_toml).get("required-version")
-    assert uv_version
+    uv_version = load_toolchain_contract(root).uv_version
 
     assert 'io.modelcontextprotocol.server.name="io.github.oaslananka/kicad-mcp-pro"' in dockerfile
     assert (

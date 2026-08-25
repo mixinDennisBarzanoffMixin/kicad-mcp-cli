@@ -233,7 +233,8 @@ def _definitions_for_unit(entry: str, unit: int) -> dict[str, _PinDefinition | N
 def _transform_point(point: Point, placed: _Placed) -> Point:
     """Transform a library point to a schematic point like KiCad pin placement."""
 
-    radians = math.radians(placed.angle)
+    # KiCad stores positive schematic rotation clockwise in screen space.
+    radians = math.radians(-placed.angle)
     screen_x, screen_y = point[0], -point[1]
     rotated_x = screen_x * math.cos(radians) - screen_y * math.sin(radians)
     rotated_y = screen_x * math.sin(radians) + screen_y * math.cos(radians)
@@ -586,13 +587,6 @@ def _route_edge_is_safe(
         owner = ownership[wire_index]
         if owner.net != net_name:
             return False
-        if kind == "overlap" and not (
-            _point_on_segment(segment[0], wire) and _point_on_segment(segment[1], wire)
-        ):
-            # A partial collinear overlap is electrically plausible but the
-            # existing evaluator intentionally refuses it.  Do not let the
-            # search manufacture a candidate which cannot pass the same gate.
-            return False
     return not any(
         _segment_intersection(segment, other_segment)[0] != "none"
         for _, other_segment in accepted_other_nets
@@ -870,7 +864,7 @@ def _evaluate_candidate(
                 )
                 if owner.net == net_name and fully_covered:
                     covered.add(segment_index)
-                else:
+                elif owner.net != net_name:
                     refusals.append(
                         {
                             "code": "existing_wire_overlap_unproven",

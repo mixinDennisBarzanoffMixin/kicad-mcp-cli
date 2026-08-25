@@ -120,11 +120,22 @@ def test_get_cli_capabilities_and_recent_projects_cover_fallbacks(
     assert discovery.get_cli_capabilities(missing_cli).version == "KiCad 10.0.1"
 
     monkeypatch.setattr(discovery.platform, "system", lambda: "Darwin")
-    assert discovery.discover_library_paths(tmp_path / "cli") == {
-        "root": None,
-        "symbols": None,
-        "footprints": None,
-    }
+    # Keep this fallback test independent of whether the host running pytest
+    # happens to have a system KiCad installation.
+    real_exists = discovery.Path.exists
+    with monkeypatch.context() as isolated:
+        isolated.setattr(
+            discovery.Path,
+            "exists",
+            lambda path: False
+            if str(path).startswith("/Applications/KiCad/")
+            else real_exists(path),
+        )
+        assert discovery.discover_library_paths(tmp_path / "cli") == {
+            "root": None,
+            "symbols": None,
+            "footprints": None,
+        }
 
     home = tmp_path / "home"
     config_dir = home / "Library" / "Preferences" / "kicad" / "10.0"

@@ -266,7 +266,9 @@ def test_schematic_file_parsers_and_wire_normalization() -> None:
     assert len(_get_symbol_bboxes(content)) == 1
     assert "(wire" not in _remove_wire_blocks(content)
     normalized = _normalize_schematic_wire_connectivity(content)
-    assert normalized.count("(wire") == 2
+    # Duplicate 0..20 runs collapse, then the horizontal wire is split at the
+    # 10,0 T attachment so later collinear merging cannot erase that branch.
+    assert normalized.count("(wire") == 3
     assert "(junction (at 10 0)" in normalized
     assert _wire_signature(10.0, 0.0, 0.0, 0.0) == ((0.0, 0.0), (10.0, 0.0))
 
@@ -402,3 +404,18 @@ def test_pin_alias_resolves_diff_pair_and_duplicate_contacts() -> None:
     assert "d" not in aliases
     # Pin numbers still resolve.
     assert aliases["1"] == aliases["D+"]  # keep-first contact for D+
+
+
+def test_pin_alias_rotation_matches_kicad_clockwise_screen_coordinates() -> None:
+    from kicad_mcp.tools.schematic import _pin_alias_positions
+
+    block = (
+        '(symbol "X_1_1"'
+        ' (pin passive line (at 0 3.81 0) (length 2.54) (name "P1") (number "1"))'
+        ' (pin passive line (at 0 -3.81 180) (length 2.54) (name "P2") (number "2")))'
+    )
+
+    aliases = _pin_alias_positions(block, 100.0, 100.0, 90)
+
+    assert aliases["1"] == (96.19, 100.0)
+    assert aliases["2"] == (103.81, 100.0)

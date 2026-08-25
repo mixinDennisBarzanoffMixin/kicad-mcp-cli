@@ -33,6 +33,7 @@ def register(
         labels: list[dict[str, Any]] | None = None,
         power_symbols: list[dict[str, Any]] | None = None,
         nets: list[dict[str, Any]] | None = None,
+        intentional_no_connect_endpoints: list[str] | None = None,
         snap_to_grid: bool = True,
         auto_layout: bool = False,
         unsafe_routed_wires: bool = False,
@@ -49,6 +50,7 @@ def register(
             labels=labels,
             power_symbols=power_symbols,
             nets=nets,
+            intentional_no_connect_endpoints=intentional_no_connect_endpoints,
             snap_to_grid=snap_to_grid,
             auto_layout=auto_layout,
             unsafe_routed_wires=unsafe_routed_wires,
@@ -61,6 +63,7 @@ def register(
         labels: list[dict[str, Any]] | None = None,
         power_symbols: list[dict[str, Any]] | None = None,
         nets: list[dict[str, Any]] | None = None,
+        intentional_no_connect_endpoints: list[str] | None = None,
         snap_to_grid: bool = True,
         auto_layout: bool = False,
         unsafe_routed_wires: bool = False,
@@ -89,6 +92,11 @@ def register(
         label kind: ``"global"`` (default when omitted, connects across the whole
         design), ``"local"`` (sheet-local label), or ``"hierarchical"`` (with an
         optional ``shape`` of input/output/bidirectional for sheet-pin wiring).
+
+        ``intentional_no_connect_endpoints`` accepts exact ``REF.PIN`` strings.
+        Every declaration is resolved against the placed symbol and rejected if
+        missing, duplicated, or also assigned to a net; validated declarations
+        are emitted as KiCad no-connect markers so ERC can distinguish intent.
 
         Set ``unsafe_routed_wires=True`` only if you explicitly want routed Manhattan
         wire segments between pins.  That star-routing can cross unrelated pins or
@@ -124,6 +132,7 @@ def register(
             labels=labels,
             power_symbols=power_symbols,
             nets=nets,
+            intentional_no_connect_endpoints=intentional_no_connect_endpoints,
             snap_to_grid=snap_to_grid,
             auto_layout=auto_layout,
             unsafe_routed_wires=unsafe_routed_wires,

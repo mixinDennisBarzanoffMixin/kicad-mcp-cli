@@ -24,6 +24,7 @@ class FakeCircuitCompilationService:
         labels: list[dict[str, Any]] | None = None,
         power_symbols: list[dict[str, Any]] | None = None,
         nets: list[dict[str, Any]] | None = None,
+        intentional_no_connect_endpoints: list[str] | None = None,
         snap_to_grid: bool = True,
         auto_layout: bool = False,
         unsafe_routed_wires: bool = False,
@@ -37,6 +38,7 @@ class FakeCircuitCompilationService:
                     "labels": labels,
                     "power_symbols": power_symbols,
                     "nets": nets,
+                    "intentional_no_connect_endpoints": intentional_no_connect_endpoints,
                     "snap_to_grid": snap_to_grid,
                     "auto_layout": auto_layout,
                     "unsafe_routed_wires": unsafe_routed_wires,
@@ -52,6 +54,7 @@ class FakeCircuitCompilationService:
         labels: list[dict[str, Any]] | None = None,
         power_symbols: list[dict[str, Any]] | None = None,
         nets: list[dict[str, Any]] | None = None,
+        intentional_no_connect_endpoints: list[str] | None = None,
         snap_to_grid: bool = True,
         auto_layout: bool = False,
         unsafe_routed_wires: bool = False,
@@ -66,6 +69,7 @@ class FakeCircuitCompilationService:
                     "labels": labels,
                     "power_symbols": power_symbols,
                     "nets": nets,
+                    "intentional_no_connect_endpoints": intentional_no_connect_endpoints,
                     "snap_to_grid": snap_to_grid,
                     "auto_layout": auto_layout,
                     "unsafe_routed_wires": unsafe_routed_wires,
@@ -114,6 +118,10 @@ def test_registration_preserves_names_descriptions_and_schemas() -> None:
         'label kind: ``"global"`` (default when omitted, connects across the whole\n'
         'design), ``"local"`` (sheet-local label), or ``"hierarchical"`` (with an\n'
         "optional ``shape`` of input/output/bidirectional for sheet-pin wiring).\n\n"
+        "``intentional_no_connect_endpoints`` accepts exact ``REF.PIN`` strings.\n"
+        "Every declaration is resolved against the placed symbol and rejected if\n"
+        "missing, duplicated, or also assigned to a net; validated declarations\n"
+        "are emitted as KiCad no-connect markers so ERC can distinguish intent.\n\n"
         "Set ``unsafe_routed_wires=True`` only if you explicitly want routed Manhattan\n"
         "wire segments between pins.  That star-routing can cross unrelated pins or\n"
         "labels and KiCad will merge them by geometry, so it can introduce silent\n"
@@ -146,6 +154,7 @@ def test_registration_preserves_names_descriptions_and_schemas() -> None:
         "labels",
         "power_symbols",
         "nets",
+        "intentional_no_connect_endpoints",
         "snap_to_grid",
         "auto_layout",
         "unsafe_routed_wires",
@@ -183,6 +192,7 @@ def test_registration_delegates_exact_arguments() -> None:
         "labels": [{"name": "NET"}],
         "power_symbols": [{"name": "GND"}],
         "nets": [{"name": "NET"}],
+        "intentional_no_connect_endpoints": ["U1.9"],
         "snap_to_grid": False,
         "auto_layout": True,
         "unsafe_routed_wires": True,

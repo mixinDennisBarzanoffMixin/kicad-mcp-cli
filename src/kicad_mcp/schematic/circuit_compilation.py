@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -24,6 +24,7 @@ class PreparedCircuitInputs:
     unresolved_nets: list[dict[str, Any]]
     resolution_stats: dict[str, int]
     chosen_paper: str
+    intentional_no_connects: list[tuple[float, float]] = field(default_factory=list)
 
 
 class PrepareInputs(Protocol):
@@ -35,6 +36,7 @@ class PrepareInputs(Protocol):
         labels: list[dict[str, Any]] | None = None,
         power_symbols: list[dict[str, Any]] | None = None,
         nets: list[dict[str, Any]] | None = None,
+        intentional_no_connect_endpoints: list[str] | None = None,
         snap_to_grid: bool = True,
         auto_layout: bool = False,
         unsafe_routed_wires: bool = False,
@@ -111,6 +113,7 @@ class SchematicCircuitCompilationService:
     wire_block: Callable[[float, float, float, float], str]
     snap_line: Callable[[float, float, float, float, bool], tuple[float, float, float, float]]
     label_block: LabelBlock
+    no_connect_block: Callable[[float, float], str]
     normalize_connectivity: Callable[[str], str]
     validate_schematic_text: Callable[[str], None]
     transactional_write: Callable[[str, Path, bool], None]
@@ -125,6 +128,7 @@ class SchematicCircuitCompilationService:
         labels: list[dict[str, Any]] | None = None,
         power_symbols: list[dict[str, Any]] | None = None,
         nets: list[dict[str, Any]] | None = None,
+        intentional_no_connect_endpoints: list[str] | None = None,
         snap_to_grid: bool = True,
         auto_layout: bool = False,
         unsafe_routed_wires: bool = False,
@@ -136,6 +140,7 @@ class SchematicCircuitCompilationService:
             labels=labels,
             power_symbols=power_symbols,
             nets=nets,
+            intentional_no_connect_endpoints=intentional_no_connect_endpoints,
             snap_to_grid=snap_to_grid,
             auto_layout=auto_layout,
             unsafe_routed_wires=unsafe_routed_wires,
@@ -160,6 +165,7 @@ class SchematicCircuitCompilationService:
         labels: list[dict[str, Any]] | None = None,
         power_symbols: list[dict[str, Any]] | None = None,
         nets: list[dict[str, Any]] | None = None,
+        intentional_no_connect_endpoints: list[str] | None = None,
         snap_to_grid: bool = True,
         auto_layout: bool = False,
         unsafe_routed_wires: bool = False,
@@ -175,6 +181,7 @@ class SchematicCircuitCompilationService:
             labels=labels,
             power_symbols=power_symbols,
             nets=nets,
+            intentional_no_connect_endpoints=intentional_no_connect_endpoints,
             snap_to_grid=snap_to_grid,
             auto_layout=auto_layout,
             unsafe_routed_wires=unsafe_routed_wires,
@@ -308,6 +315,9 @@ class SchematicCircuitCompilationService:
                 )
             )
 
+        for no_connect_x, no_connect_y in prepared.intentional_no_connects:
+            elements.append(self.no_connect_block(no_connect_x, no_connect_y))
+
         library_section = "\t(lib_symbols\n"
         for library_definition in library_content:
             library_section += (
@@ -354,6 +364,11 @@ class SchematicCircuitCompilationService:
             )
         if auto_layout:
             notes.append("Applied auto-layout to schematic symbols.")
+        if prepared.intentional_no_connects:
+            notes.append(
+                f"Placed {len(prepared.intentional_no_connects)} validated intentional "
+                "no-connect marker(s)."
+            )
         if prepared.nets:
             if unsafe_routed_wires:
                 notes.append(

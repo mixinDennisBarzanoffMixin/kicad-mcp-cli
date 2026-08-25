@@ -42,6 +42,7 @@ from .deep_inspection import (
     route_plan,
     verification_report,
 )
+from .endpoint_net_equality import compare_compiled_endpoint_nets
 from .schematic_graph_placement import (
     format_schematic_graph_placement,
     plan_schematic_graph_placement,
@@ -583,6 +584,26 @@ async def run_staged_schematic_edit(args: argparse.Namespace) -> dict[str, Any]:
             net=args.net,
             artifacts_dir=artifacts / "after",
         )
+        endpoint_net_equality = compare_compiled_endpoint_nets(
+            tool_calls,
+            after_report["checks"]["connectivity"],
+        )
+        if endpoint_net_equality["status"] == "fail":
+            return {
+                "schema_version": "1.0",
+                "status": "rejected",
+                "promoted": False,
+                "reason": "staged build endpoint-to-net equality failed",
+                "tool": transaction_label,
+                "tool_result": payloads[0] if len(payloads) == 1 else payloads,
+                "tool_results": payloads,
+                "changed_files": [str(relative)],
+                "endpoint_net_equality": endpoint_net_equality,
+                "before": before_report,
+                "after": after_report,
+                "artifacts": str(artifacts),
+                "diff": str(diff_path),
+            }
         expected_rewire_fingerprints = getattr(args, "expected_rewire_fingerprints", None)
         if expected_rewire_fingerprints:
             staged_rewire_plan = plan_railway_rewire(
@@ -621,6 +642,7 @@ async def run_staged_schematic_edit(args: argparse.Namespace) -> dict[str, Any]:
                 "tool_results": payloads,
                 "changed_files": [str(relative)],
                 "new_erc_errors": [json.loads(item) for item in new_erc_errors],
+                "endpoint_net_equality": endpoint_net_equality,
                 "before": before_report,
                 "after": after_report,
                 "artifacts": str(artifacts),
@@ -673,6 +695,7 @@ async def run_staged_schematic_edit(args: argparse.Namespace) -> dict[str, Any]:
         "artifacts": str(artifacts),
         "diff": str(artifacts / "edit.diff"),
         "diff_lines": len(diff_text.splitlines()),
+        "endpoint_net_equality": endpoint_net_equality,
         "rewire_fingerprints": staged_rewire_fingerprints,
     }
 
@@ -1092,6 +1115,11 @@ def build_parser() -> argparse.ArgumentParser:
         dest="candidate_count",
         help="deterministic fresh-layout candidate budget",
     )
+    arrange_spec.add_argument(
+        "--reflow",
+        action="store_true",
+        help="replace all saved symbol coordinates with the selected fresh layout",
+    )
     arrange_spec.add_argument("--format", choices=("report", "json", "spec"), default="report")
 
     route = subcommands.add_parser(
@@ -1394,6 +1422,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 spec,
                 source=source,
                 candidate_count=args.candidate_count,
+                respect_anchors=not args.reflow,
             )
             if args.format == "spec":
                 print(json.dumps(result["arranged_spec"], indent=2))

@@ -5,11 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from kicad_mcp.schematic_graph_placement import (
+    _clamp_point,
     format_schematic_graph_placement,
     plan_fresh_schematic_layout,
     plan_schematic_graph_placement,
 )
 from kicad_mcp.shell_cli import build_parser
+from kicad_mcp.utils.geometry import Box
 
 REFERENCES = ("J1", "U1", "R1", "U2", "C1")
 
@@ -43,6 +45,13 @@ def _sheet() -> str:
 
 def _node(reference: str, pin_type: str) -> dict[str, str]:
     return {"reference": reference, "pin": "1", "function": "P", "type": pin_type}
+
+
+def test_grid_snapping_cannot_push_clamped_symbol_back_off_sheet() -> None:
+    size = (38.1, 48.26)
+    point = _clamp_point((0.0, 0.0), size, (420.0, 297.0), margin_mm=5.0)
+
+    assert Box.from_center(*point, *size).inside(Box(0.0, 0.0, 420.0, 297.0), margin_mm=5.0)
 
 
 def _snapshot(tmp_path: Path, *, feedback: bool = False) -> dict[str, object]:

@@ -18,7 +18,46 @@ def _require_records(value: object, *, field: str) -> list[JsonRecord]:
     return value
 
 
-def _planner_nets(nets: list[JsonRecord]) -> tuple[list[JsonRecord], int]:
+def _planner_symbols(
+    symbols: list[JsonRecord],
+) -> tuple[list[JsonRecord], dict[str, dict[str, str]]]:
+    """Enrich a build spec with installed-library size and pin-type evidence."""
+
+    # Local import keeps the standalone graph planner lightweight and avoids a
+    # module-level dependency on the schematic MCP composition root.
+    from .tools.schematic import _symbol_local_extent, get_pin_metadata
+
+    enriched = copy.deepcopy(symbols)
+    pin_types: dict[str, dict[str, str]] = {}
+    for symbol in enriched:
+        reference = str(symbol["reference"])
+        library = str(symbol.get("library", ""))
+        symbol_name = str(symbol.get("symbol_name", ""))
+        unit = int(symbol.get("unit", 1) or 1)
+        aliases: dict[str, str] = {}
+        if library and symbol_name:
+            for number, info in get_pin_metadata(library, symbol_name, unit).items():
+                electrical_type = str(info.get("etype", "passive"))
+                name = str(info.get("name", ""))
+                for key in (number, number.casefold(), name, name.casefold()):
+                    if key:
+                        aliases.setdefault(key, electrical_type)
+        pin_types[reference] = aliases
+
+        extent = _symbol_local_extent(symbol)
+        if extent is not None:
+            _min_x, _min_y, width, height = extent
+            # Reserve room for body text and one short terminal lane around the
+            # exact pin span.  The graph repairer then treats large MCUs and
+            # connectors as large objects instead of default 7.62 mm squares.
+            symbol.setdefault("width_mm", max(7.62, width + 15.24))
+            symbol.setdefault("height_mm", max(7.62, height + 10.16))
+    return enriched, pin_types
+
+
+def _planner_nets(
+    nets: list[JsonRecord], pin_types: dict[str, dict[str, str]]
+) -> tuple[list[JsonRecord], int]:
     """Translate build-spec ``REF.PIN`` endpoints to railway graph nodes."""
 
     translated: list[JsonRecord] = []
@@ -43,14 +82,16 @@ def _planner_nets(nets: list[JsonRecord]) -> tuple[list[JsonRecord], int]:
                 raise ValueError(
                     f"circuit spec net {name!r} endpoint {endpoint!r} must be REF.PIN"
                 )
+            reference_types = pin_types.get(reference, {})
             nodes.append(
                 {
                     "reference": reference,
                     "pin": pin,
                     "function": "",
-                    # Build specs do not carry library pin electrical types. Keep
-                    # direction explicitly unknown instead of inventing authority.
-                    "type": "passive",
+                    "type": reference_types.get(
+                        pin,
+                        reference_types.get(pin.casefold(), "passive"),
+                    ),
                 }
             )
             endpoint_count += 1
@@ -97,8 +138,9 @@ def arrange_circuit_spec(
     *,
     source: str = "stdin",
     candidate_count: int = 3,
+    respect_anchors: bool = True,
 ) -> JsonRecord:
-    """Fill only absent symbol coordinates using the fresh railway planner.
+    """Fill absent coordinates, or reflow all symbols, using the railway planner.
 
     The returned ``arranged_spec`` is directly consumable by ``sch_build_circuit``
     or ``sch_analyze_net_compilation``. Planning diagnostics live beside it and
@@ -108,10 +150,11 @@ def arrange_circuit_spec(
     symbols = _require_records(spec.get("symbols"), field="symbols")
     nets = _require_records(spec.get("nets", []), field="nets")
     references = _validate_symbols(symbols)
-    planner_nets, endpoint_count = _planner_nets(nets)
+    planner_symbols, pin_types = _planner_symbols(symbols)
+    planner_nets, endpoint_count = _planner_nets(nets, pin_types)
     paper, extent = _page_extent(spec)
     layout = plan_fresh_schematic_layout(
-        symbols,
+        planner_symbols,
         planner_nets,
         page_extent_mm=extent,
         candidate_count=candidate_count,
@@ -133,10 +176,10 @@ def arrange_circuit_spec(
         elif has_x or has_y:
             partially_anchored.append(reference)
         proposed_x, proposed_y = generated_by_ref[reference]
-        if not has_x:
+        if not respect_anchors or not has_x:
             symbol["x_mm"] = proposed_x
             generated_axes += 1
-        if not has_y:
+        if not respect_anchors or not has_y:
             symbol["y_mm"] = proposed_y
             generated_axes += 1
     arranged["auto_layout"] = False
@@ -155,12 +198,16 @@ def arrange_circuit_spec(
             "partial_anchors": len(partially_anchored),
             "generated_coordinate_axes": generated_axes,
             "generated_symbols": sum(
-                1 for symbol in symbols if "x_mm" not in symbol or "y_mm" not in symbol
+                1
+                for symbol in symbols
+                if not respect_anchors or "x_mm" not in symbol or "y_mm" not in symbol
             ),
+            "respect_anchors": respect_anchors,
         },
         "anchors": {
             "explicit": sorted(explicit_anchors),
             "partial": sorted(partially_anchored),
+            "honored": respect_anchors,
         },
         "layout": layout,
         "arranged_spec": arranged,
