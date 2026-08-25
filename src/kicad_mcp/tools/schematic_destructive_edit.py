@@ -22,10 +22,14 @@ def register(mcp: FastMCP, dependencies: SchematicDestructiveEditDependencies) -
     service = dependencies.service
 
     @mcp.tool()
-    def sch_delete_wire(wire_id: str) -> str:
-        """Remove a specific wire segment using its UUID or unique UUID prefix."""
+    def sch_delete_wire(
+        wire_id: str,
+        sheet: str | None = None,
+        sheet_file: str | None = None,
+    ) -> str:
+        """Remove a wire by UUID from the root or selected child sheet."""
         payload = DeleteWireInput(wire_id=wire_id)
-        return service.delete_wire(payload.wire_id)
+        return service.delete_wire(payload.wire_id, sheet=sheet, sheet_file=sheet_file)
 
     @mcp.tool()
     def sch_delete_symbol(
@@ -38,10 +42,22 @@ def register(mcp: FastMCP, dependencies: SchematicDestructiveEditDependencies) -
         return service.delete_symbol(payload.reference, sheet=sheet, sheet_file=sheet_file)
 
     @mcp.tool()
-    def sch_delete_label(name: str, x_mm: float, y_mm: float) -> str:
+    def sch_delete_label(
+        name: str,
+        x_mm: float,
+        y_mm: float,
+        sheet: str | None = None,
+        sheet_file: str | None = None,
+    ) -> str:
         """Delete label(s) (local/global/hierarchical) matching ``name`` at the
         given coordinate. Use sch_get_labels() to find exact names/positions."""
-        return service.delete_label(name, x_mm, y_mm)
+        return service.delete_label(
+            name,
+            x_mm,
+            y_mm,
+            sheet=sheet,
+            sheet_file=sheet_file,
+        )
 
     @mcp.tool()
     def sch_delete_no_connect(x_mm: float, y_mm: float) -> str:

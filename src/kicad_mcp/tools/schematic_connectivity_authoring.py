@@ -44,6 +44,11 @@ def register(mcp: FastMCP, dependencies: SchematicConnectivityAuthoringDependenc
         common terminal name. This is the clean alternative to placing bare
         labels directly on pins.
 
+        A connection may set ``"direction"`` to ``"left"``, ``"right"``,
+        ``"up"``, or ``"down"`` to override automatic outward-direction
+        inference. This is useful for single-row two-pin devices such as diodes,
+        whose topology is ambiguous without symbol-body geometry.
+
         ``label_kind`` selects the emitted label type for non-power nets:
         ``"local"``, ``"global"``, or ``"hierarchical"``. When set it takes
         precedence over the legacy ``global_labels`` boolean, enabling batch

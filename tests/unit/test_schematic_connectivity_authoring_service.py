@@ -226,6 +226,54 @@ def test_add_pin_labels_writes_signal_stub_and_target_detail(tmp_path: Path) -> 
     assert "LABEL(SIG,17.08,20.0,0,label,None)" in content
 
 
+def test_add_pin_labels_allows_explicit_stub_direction(tmp_path: Path) -> None:
+    harness = _harness(
+        tmp_path,
+        parsed={"uuid": "root", "symbols": [_symbol()], "power_symbols": []},
+        pin_positions={("Device", "R"): {"1": (12.0, 20.0)}},
+        power_net=lambda name: False,
+    )
+
+    result = harness.service.add_pin_labels(
+        [{"reference": "U1", "pin": "1", "net": "SIG", "direction": "left"}],
+        stub_mm=5.08,
+    )
+
+    assert "U1.1 -> SIG @ (6.92, 20.0)" in result
+    assert "WIRE(12.0,20.0->6.92,20.0)" in harness.writes[0][1]
+
+
+def test_explicit_vertical_direction_honors_requested_stub_length(tmp_path: Path) -> None:
+    harness = _harness(
+        tmp_path,
+        parsed={"uuid": "root", "symbols": [_symbol()], "power_symbols": []},
+        pin_positions={("Device", "R"): {"1": (12.0, 20.0)}},
+        power_net=lambda name: False,
+    )
+
+    result = harness.service.add_pin_labels(
+        [{"reference": "U1", "pin": "1", "net": "SIG", "direction": "down"}],
+        stub_mm=2.54,
+    )
+
+    assert "U1.1 -> SIG @ (12.0, 22.54)" in result
+    assert "WIRE(12.0,20.0->12.0,22.54)" in harness.writes[0][1]
+
+
+def test_add_pin_labels_rejects_invalid_explicit_stub_direction(tmp_path: Path) -> None:
+    harness = _harness(
+        tmp_path,
+        parsed={"uuid": "root", "symbols": [_symbol()], "power_symbols": []},
+        pin_positions={("Device", "R"): {"1": (12.0, 20.0)}},
+        power_net=lambda name: False,
+    )
+
+    with pytest.raises(ValueError, match="direction must be one of"):
+        harness.service.add_pin_labels(
+            [{"reference": "U1", "pin": "1", "net": "SIG", "direction": "diagonal"}]
+        )
+
+
 def test_add_pin_labels_emits_hierarchical_label_with_shape(tmp_path: Path) -> None:
     harness = _harness(
         tmp_path,

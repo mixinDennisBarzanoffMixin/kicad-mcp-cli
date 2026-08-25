@@ -62,6 +62,13 @@ LABEL_KIND_TO_BLOCK_KIND: dict[str, str] = {
     "hierarchical": "hierarchical_label",
 }
 
+PIN_STUB_DIRECTIONS: dict[str, tuple[float, float]] = {
+    "left": (-1.0, 0.0),
+    "right": (1.0, 0.0),
+    "up": (0.0, -1.0),
+    "down": (0.0, 1.0),
+}
+
 
 @dataclass(frozen=True)
 class SchematicConnectivityAuthoringService:
@@ -289,8 +296,34 @@ class SchematicConnectivityAuthoringService:
                 sx, sy = shared_terminal
                 results.append(f"{ref}.{pin} -> {net} (stacked on shared terminal @ ({sx}, {sy}))")
                 continue
-            ux, uy = self.pin_label_stub_direction(point, (ox, oy), pin_positions.values())
-            length = max(stub_mm, 10.16) if uy else stub_mm
+            requested_direction = conn.get("direction")
+            if requested_direction is not None:
+                if not isinstance(requested_direction, str):
+                    raise ValueError(
+                        "direction must be one of "
+                        f"{sorted(PIN_STUB_DIRECTIONS)}, got {requested_direction!r}"
+                    )
+                direction_key = requested_direction.casefold()
+                if direction_key not in PIN_STUB_DIRECTIONS:
+                    raise ValueError(
+                        "direction must be one of "
+                        f"{sorted(PIN_STUB_DIRECTIONS)}, got {requested_direction!r}"
+                    )
+                ux, uy = PIN_STUB_DIRECTIONS[direction_key]
+            else:
+                ux, uy = self.pin_label_stub_direction(
+                    point,
+                    (ox, oy),
+                    pin_positions.values(),
+                )
+            # Automatic vertical stubs retain the historical 10.16 mm clearance
+            # used to clear symbol value text. An explicit direction is a layout
+            # instruction, so honor the caller's requested stub length exactly.
+            length = (
+                stub_mm
+                if requested_direction is not None
+                else (max(stub_mm, 10.16) if uy else stub_mm)
+            )
             ex = round(px + ux * length, 4)
             ey = round(py + uy * length, 4)
             stagger_steps = 0

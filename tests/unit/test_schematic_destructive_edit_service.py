@@ -163,6 +163,35 @@ def test_delete_wire_preserves_prefix_matching_and_destructive_transaction() -> 
     assert transaction.updated == "aabb"
 
 
+def test_delete_wire_can_target_child_sheet() -> None:
+    current = "aa(wire-a)bb"
+    record = {"uuid": "abc123", "x1": 1.0, "y1": 2.0, "x2": 3.0, "y2": 4.0}
+    writes: list[tuple[Path, bool]] = []
+
+    def child_write(
+        path: Path,
+        mutator: Callable[[str], str],
+        *,
+        allow_node_loss: bool = False,
+    ) -> str:
+        writes.append((path, allow_node_loss))
+        return mutator(current)
+
+    service, root_transaction = _service(
+        current=current,
+        wire_records=[record],
+        wire_blocks={"(wire-a)": record},
+        child_transaction=child_write,
+    )
+
+    result = service.delete_wire("abc", sheet_file="power.kicad_sch")
+
+    assert "Child schematic updated" in result
+    assert "Target schematic: power.kicad_sch" in result
+    assert writes == [(Path("power.kicad_sch"), True)]
+    assert root_transaction.calls == []
+
+
 def test_delete_wire_preserves_missing_and_ambiguous_results() -> None:
     missing, missing_tx = _service(current="plain")
     assert missing.delete_wire("missing") == (
@@ -238,6 +267,38 @@ def test_delete_label_matches_raw_or_grid_snapped_coordinates() -> None:
     )
     assert transaction.calls == [True]
     assert transaction.updated == "aabb"
+
+
+def test_delete_label_can_target_child_sheet() -> None:
+    current = "aa(label-vcc)bb"
+    writes: list[tuple[Path, bool]] = []
+
+    def child_write(
+        path: Path,
+        mutator: Callable[[str], str],
+        *,
+        allow_node_loss: bool = False,
+    ) -> str:
+        writes.append((path, allow_node_loss))
+        return mutator(current)
+
+    service, root_transaction = _service(
+        current=current,
+        label_blocks={"(label-vcc)": {"name": "VCC", "x": 50.8, "y": 50.8}},
+        child_transaction=child_write,
+    )
+
+    result = service.delete_label(
+        "VCC",
+        50.8,
+        50.8,
+        sheet_file="power.kicad_sch",
+    )
+
+    assert "Child schematic updated" in result
+    assert "Target schematic: power.kicad_sch" in result
+    assert writes == [(Path("power.kicad_sch"), True)]
+    assert root_transaction.calls == []
 
 
 def test_delete_label_skips_nonmatching_label_before_target() -> None:

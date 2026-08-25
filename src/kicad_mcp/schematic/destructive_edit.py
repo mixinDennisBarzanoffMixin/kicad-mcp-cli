@@ -79,10 +79,20 @@ class SchematicDestructiveEditService:
     resolve_schematic_file: ResolveSchematicFile | None = None
     transactional_write_to_file: TransactionalWriteToFile | None = None
 
-    def delete_wire(self, wire_id: str) -> str:
-        """Delete one wire selected by UUID or unique UUID prefix."""
-        schematic_file = self.active_schematic_file()
-        current = self.read_schematic_text(schematic_file)
+    def delete_wire(
+        self,
+        wire_id: str,
+        sheet: str | None = None,
+        sheet_file: str | None = None,
+    ) -> str:
+        """Delete one wire selected by UUID from the root or a child sheet."""
+        schematic_path = self.active_schematic_file()
+        targeted_child = bool(sheet or sheet_file)
+        if targeted_child:
+            if self.resolve_schematic_file is None or self.transactional_write_to_file is None:
+                raise ValueError("Child-sheet deletion is not configured for this backend.")
+            schematic_path = self.resolve_schematic_file(sheet, sheet_file)
+        current = self.read_schematic_text(schematic_path)
         matches = [
             wire
             for wire in self.extract_wires(current)
@@ -136,14 +146,28 @@ class SchematicDestructiveEditService:
             return "".join(pieces)
 
         try:
-            self.transactional_write(mutator, allow_node_loss=True)
+            if targeted_child and self.transactional_write_to_file is not None:
+                self.transactional_write_to_file(
+                    schematic_path,
+                    mutator,
+                    allow_node_loss=True,
+                )
+            else:
+                self.transactional_write(mutator, allow_node_loss=True)
         except ValueError as exc:
             return str(exc)
+        reload_notice = (
+            "Child schematic updated; reload it in KiCad if open."
+            if targeted_child
+            else self.reload_schematic()
+        )
+        target_notice = f"\nTarget schematic: {schematic_path}" if targeted_child else ""
         return (
-            f"{self.reload_schematic()}\n"
+            f"{reload_notice}\n"
             f"Deleted wire '{target['uuid']}' from "
             f"({self.format_mm(float(target['x1']))}, {self.format_mm(float(target['y1']))}) to "
             f"({self.format_mm(float(target['x2']))}, {self.format_mm(float(target['y2']))})."
+            f"{target_notice}"
         )
 
     def delete_symbol(
@@ -225,11 +249,24 @@ class SchematicDestructiveEditService:
             result += f"\nTarget schematic: {target}"
         return result
 
-    def delete_label(self, name: str, x_mm: float, y_mm: float) -> str:
-        """Delete matching label blocks at raw or grid-snapped coordinates."""
+    def delete_label(
+        self,
+        name: str,
+        x_mm: float,
+        y_mm: float,
+        sheet: str | None = None,
+        sheet_file: str | None = None,
+    ) -> str:
+        """Delete matching labels from the root or a selected child sheet."""
         tolerance = 0.05
         removed = 0
         snapped_x, snapped_y = self.snap_point(x_mm, y_mm, True)
+        target = self.active_schematic_file()
+        targeted_child = bool(sheet or sheet_file)
+        if targeted_child:
+            if self.resolve_schematic_file is None or self.transactional_write_to_file is None:
+                raise ValueError("Child-sheet deletion is not configured for this backend.")
+            target = self.resolve_schematic_file(sheet, sheet_file)
 
         def matches_target(parsed: ParsedRecord) -> bool:
             for target_x, target_y in ((x_mm, y_mm), (snapped_x, snapped_y)):
@@ -265,13 +302,23 @@ class SchematicDestructiveEditService:
             return "".join(pieces)
 
         try:
-            self.transactional_write(mutator, allow_node_loss=True)
+            if targeted_child and self.transactional_write_to_file is not None:
+                self.transactional_write_to_file(target, mutator, allow_node_loss=True)
+            else:
+                self.transactional_write(mutator, allow_node_loss=True)
         except ValueError as exc:
             return str(exc)
+        reload_notice = (
+            "Child schematic updated; reload it in KiCad if open."
+            if targeted_child
+            else self.reload_schematic()
+        )
+        target_notice = f"\nTarget schematic: {target}" if targeted_child else ""
         return (
-            f"{self.reload_schematic()}\n"
+            f"{reload_notice}\n"
             f"Deleted {removed} label(s) '{name}' at "
             f"({self.format_mm(x_mm)}, {self.format_mm(y_mm)})."
+            f"{target_notice}"
         )
 
     def delete_no_connect(self, x_mm: float, y_mm: float) -> str:
