@@ -1802,6 +1802,7 @@ def _register_profile_components(
     from .resources import analysis, board_state, server_info, studio_context
     from .tools import (
         capability_parity,
+        deep_project,
         dfm,
         embedded_files,
         emc_compliance,
@@ -1833,6 +1834,7 @@ def _register_profile_components(
     project.register(server)
     capability_parity.register(server)
     embedded_files.register(server)
+    deep_project.register(server)
 
     if "pcb_read" in enabled or "pcb_write" in enabled:
         pcb.register(server)

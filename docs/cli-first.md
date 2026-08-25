@@ -32,6 +32,31 @@ kicadq -C ./board grep 'USB|VBUS' | jq -r '[.path,.line,.text] | @tsv'
 kicadq -C ./board grep GND --format lines | rg regulator
 ```
 
+## Deep project inspection and maps
+
+The deep snapshot uses KiCad's XML netlist export plus the board file, so it sees
+hierarchical sheets, component/pin connectivity, placed pads, tracks, vias, and
+board geometry without requiring the GUI to be open.
+
+```bash
+kicadq -C ./board inspect | jq '.schematic.counts, .board.counts'
+kicadq -C ./board inspect --net USB --format jsonl
+kicadq -C ./board map --zoom 0              # sheets/subsystems
+kicadq -C ./board map --zoom 1 --sheet LTE  # components
+kicadq -C ./board map --zoom 2 --net SPI    # pin-level nets
+kicadq -C ./board map --zoom 3 --width 120  # PCB geometry
+```
+
+Route planning is a dry run by default. Critical power, ground, RF, clock, and
+USB differential nets are refused unless explicitly overridden. Applying a plan
+also requires write mode and a second confirmation flag; the live KiCad backend
+performs the actual track creation.
+
+```bash
+kicadq -C ./board route GPIO17 | jq '.segments'
+kicadq -C ./board --mode write route GPIO17 --apply --yes
+```
+
 ## Compact MCP facade
 
 `kicad-mcp-cli` publishes only three MCP tools:

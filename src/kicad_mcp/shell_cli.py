@@ -25,6 +25,7 @@ from mcp import types as mcp_types
 from pydantic import BaseModel
 
 from .config import reset_config
+from .deep_inspection import ascii_map, filter_snapshot, project_snapshot, route_plan
 from .server import build_server
 from .tools.router import TOOL_CATEGORIES, available_profiles
 
@@ -406,6 +407,35 @@ def build_parser() -> argparse.ArgumentParser:
     grep.add_argument("--ignore-case", "-i", action="store_true")
     grep.add_argument("--limit", type=int, default=0)
     grep.add_argument("--format", choices=("json", "jsonl", "lines"), default="jsonl")
+
+    inspect = subcommands.add_parser(
+        "inspect", help="emit one deep hierarchical schematic and PCB snapshot"
+    )
+    inspect.add_argument("--sheet", default="", help="filter by hierarchical sheet substring")
+    inspect.add_argument("--net", default="", help="filter by net-name substring")
+    inspect.add_argument("--ref", dest="reference", default="", help="filter by exact reference")
+    inspect.add_argument("--format", choices=("json", "jsonl"), default="json")
+
+    map_command = subcommands.add_parser(
+        "map", help="render a zoomable-in-spirit ASCII/Unicode project map"
+    )
+    map_command.add_argument("--zoom", type=int, choices=range(4), default=0)
+    map_command.add_argument("--width", type=int, default=100)
+    map_command.add_argument("--sheet", default="")
+    map_command.add_argument("--net", default="")
+    map_command.add_argument("--ref", dest="reference", default="")
+
+    route = subcommands.add_parser(
+        "route", help="plan or apply a conservative PCB route for one net"
+    )
+    route.add_argument("net")
+    route.add_argument("--layer", default="F.Cu")
+    route.add_argument("--width", type=float, default=0.25, dest="width_mm")
+    route.add_argument("--clearance", type=float, default=0.5, dest="clearance_mm")
+    route.add_argument("--allow-critical", action="store_true")
+    route.add_argument("--apply", action="store_true")
+    route.add_argument("--yes", action="store_true", help="confirm route mutation")
+    route.add_argument("--format", choices=("json", "jsonl"), default="json")
     return parser
 
 
@@ -444,6 +474,70 @@ def main(argv: Sequence[str] | None = None) -> None:
                 _emit_records(records, args.format)
             if not records:
                 raise SystemExit(1)
+            return
+        if args.command == "inspect":
+            snapshot = filter_snapshot(
+                project_snapshot(args.project_dir or "."),
+                sheet=args.sheet,
+                net=args.net,
+                reference=args.reference,
+            )
+            if args.format == "jsonl":
+                for section in ("project", "schematic", "board"):
+                    print(
+                        json.dumps(
+                            {"section": section, "data": snapshot[section]},
+                            separators=(",", ":"),
+                        )
+                    )
+            else:
+                print(json.dumps(snapshot, indent=2, sort_keys=True))
+            return
+        if args.command == "map":
+            snapshot = filter_snapshot(
+                project_snapshot(args.project_dir or "."),
+                sheet=args.sheet,
+                net=args.net,
+                reference=args.reference,
+            )
+            print(ascii_map(snapshot, zoom=args.zoom, width=args.width))
+            return
+        if args.command == "route":
+            plan = route_plan(
+                project_snapshot(args.project_dir or "."),
+                args.net,
+                layer=args.layer,
+                width_mm=args.width_mm,
+                clearance_mm=args.clearance_mm,
+                allow_critical=args.allow_critical,
+            )
+            if args.apply:
+                if args.mode not in {"write", "experimental"}:
+                    raise ValueError("--apply requires --mode write or --mode experimental")
+                if not args.yes:
+                    raise ValueError("--apply requires --yes after reviewing the route plan")
+                if plan["status"] != "planned":
+                    reason = plan.get("reason", plan["status"])
+                    raise ValueError(f"route cannot be applied: {reason}")
+                payload = asyncio.run(
+                    invoke_backend_tool(args, "pcb_add_tracks_bulk", {"tracks": plan["segments"]})
+                )
+                plan["apply_result"] = payload
+                if not payload["ok"]:
+                    raise RuntimeError("backend rejected route application")
+            indent = 2 if args.format == "json" else None
+            print(
+                json.dumps(
+                    plan,
+                    indent=indent,
+                    separators=None if indent else (",", ":"),
+                    sort_keys=True,
+                )
+            )
+            if plan["status"] == "refused":
+                raise SystemExit(3)
+            if plan["status"] == "blocked":
+                raise SystemExit(4)
             return
     except BrokenPipeError:
         # A downstream command (commonly head/jq/rg) intentionally stopped

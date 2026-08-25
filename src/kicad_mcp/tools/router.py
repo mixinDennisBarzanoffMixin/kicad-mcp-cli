@@ -144,6 +144,8 @@ TOOL_CATEGORIES: dict[str, ToolCategory] = {
             "project_full_validation_loop",
             "project_gate_trend",
             "project_design_report",
+            "project_get_deep_snapshot",
+            "project_get_ascii_map",
             "kicad_list_recent_projects",
             "kicad_scan_directory",
             "kicad_create_new_project",
@@ -188,6 +190,7 @@ TOOL_CATEGORIES: dict[str, ToolCategory] = {
             # v3.8.0 — net analysis
             "pcb_get_net_statistics",
             "pcb_net_inspector",
+            "pcb_get_route_plan",
             # v3.8.0 — test point tools
             "pcb_add_test_point",
             "pcb_list_test_points",
