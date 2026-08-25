@@ -47,6 +47,7 @@ _SIDE_DIR: dict[PinSide, str] = {
 _PIN_PITCH = 2.54  # mm (100 mil)
 _PIN_LENGTH = 2.54  # mm (100 mil)
 _BOX_PAD = 2.54  # mm margin inside body rectangle
+_PIN_NAME_CHAR_WIDTH = 0.9  # conservative width estimate for 1.27 mm text
 
 
 @dataclass
@@ -98,13 +99,29 @@ def _layout_pins(
 def _side_geometry(
     groups: dict[PinSide, list[PinSpec]],
 ) -> tuple[float, float]:
-    """Calculate body width and height to fit all pins."""
+    """Calculate body width and height to fit pins and their visible names."""
     left_h = max(len(groups["left"]) - 1, 0) * _PIN_PITCH + _BOX_PAD * 2
     right_h = max(len(groups["right"]) - 1, 0) * _PIN_PITCH + _BOX_PAD * 2
     top_w = max(len(groups["top"]) - 1, 0) * _PIN_PITCH + _BOX_PAD * 2
     bot_w = max(len(groups["bottom"]) - 1, 0) * _PIN_PITCH + _BOX_PAD * 2
-    body_h = max(left_h, right_h, 2 * _PIN_PITCH)
-    body_w = max(top_w, bot_w, 4 * _PIN_PITCH)
+    left_name_w = max((len(pin.name) for pin in groups["left"]), default=0) * _PIN_NAME_CHAR_WIDTH
+    right_name_w = max((len(pin.name) for pin in groups["right"]), default=0) * _PIN_NAME_CHAR_WIDTH
+    top_name_h = max((len(pin.name) for pin in groups["top"]), default=0) * _PIN_NAME_CHAR_WIDTH
+    bottom_name_h = (
+        max((len(pin.name) for pin in groups["bottom"]), default=0) * _PIN_NAME_CHAR_WIDTH
+    )
+    body_h = max(
+        left_h,
+        right_h,
+        top_name_h + bottom_name_h + 2 * _BOX_PAD,
+        2 * _PIN_PITCH,
+    )
+    body_w = max(
+        top_w,
+        bot_w,
+        left_name_w + right_name_w + 2 * _BOX_PAD,
+        4 * _PIN_PITCH,
+    )
     # Round up to nearest grid
     body_h = math.ceil(body_h / _PIN_PITCH) * _PIN_PITCH
     body_w = math.ceil(body_w / _PIN_PITCH) * _PIN_PITCH
@@ -144,6 +161,15 @@ def generate_symbol(
     if not units:
         units[1] = []
 
+    unit_layouts: dict[int, tuple[dict[PinSide, list[PinSpec]], float, float]] = {}
+    for unit_idx, unit_pins in units.items():
+        groups = _layout_pins(unit_pins)
+        body_w, body_h = _side_geometry(groups)
+        unit_layouts[unit_idx] = (groups, body_w, body_h)
+    max_half_h = max(body_h for _groups, _body_w, body_h in unit_layouts.values()) / 2
+    reference_y = max_half_h + _PIN_PITCH
+    value_y = -max_half_h - _PIN_PITCH
+
     lines: list[str] = [
         "(kicad_symbol_lib",
         f"\t(version {GENERATED_SEXPR_DIALECT_VERSION})",
@@ -155,11 +181,11 @@ def generate_symbol(
         "\t\t(on_board yes)",
         # Properties
         f'\t\t(property "Reference" {_escape(reference_prefix)}',
-        "\t\t\t(at 0 0 0)",
+        f"\t\t\t(at 0 {reference_y:.4f} 0)",
         "\t\t\t(effects (font (size 1.27 1.27)))",
         "\t\t)",
         f'\t\t(property "Value" {_escape(name)}',
-        "\t\t\t(at 0 -2.54 0)",
+        f"\t\t\t(at 0 {value_y:.4f} 0)",
         "\t\t\t(effects (font (size 1.27 1.27)))",
         "\t\t)",
         f'\t\t(property "Footprint" {_escape(footprint_hint)}',
@@ -177,9 +203,7 @@ def generate_symbol(
     ]
 
     for unit_idx in sorted(units):
-        unit_pins = units[unit_idx]
-        groups = _layout_pins(unit_pins)
-        body_w, body_h = _side_geometry(groups)
+        groups, body_w, body_h = unit_layouts[unit_idx]
         half_w = body_w / 2
         half_h = body_h / 2
         # Emit unit graphics (body rectangle + pin-1 dot + pins)

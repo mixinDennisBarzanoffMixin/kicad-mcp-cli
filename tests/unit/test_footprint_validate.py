@@ -81,6 +81,7 @@ def test_expected_pin_count_from_package_reads_pin_count_families() -> None:
     assert expected_pin_count_from_package("Package_SO:TSSOP-20_4.4x6.5mm_P0.65mm") == 20
     assert expected_pin_count_from_package("Package_DIP:PDIP-16_W7.62mm") == 16
     assert expected_pin_count_from_package("Flux:Texas_DQA0010A_USON-10_2.5x1.0mm") == 10
+    assert expected_pin_count_from_package("Flux:SIMCom_A7670E_LASE_LCC-LGA-124_24x24mm") == 124
 
 
 def test_expected_pin_count_handles_code_first_packages() -> None:

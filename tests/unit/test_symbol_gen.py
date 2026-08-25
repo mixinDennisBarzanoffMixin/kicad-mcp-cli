@@ -146,6 +146,32 @@ def test_two_unit_symbol() -> None:
     assert _is_balanced(sym)
 
 
+def test_body_width_accounts_for_long_opposing_pin_names() -> None:
+    pins = [
+        PinSpec(1, "VERY_LONG_INPUT_SIGNAL", "input", "left"),
+        PinSpec(2, "VERY_LONG_OUTPUT_SIGNAL", "output", "right"),
+    ]
+    sym = generate_symbol("WIDE", pins)
+    rectangle = re.search(
+        r"\(rectangle \(start (-?[\d.]+) [\d.-]+\) \(end ([\d.]+) [\d.-]+\)",
+        sym,
+    )
+    assert rectangle is not None
+    assert float(rectangle.group(2)) - float(rectangle.group(1)) >= 40.0
+
+
+def test_reference_and_value_are_outside_largest_multiunit_body() -> None:
+    pins = [
+        *[PinSpec(index, f"A{index}", "input", "left", unit=1) for index in range(1, 13)],
+        PinSpec(20, "B", "input", "left", unit=2),
+    ]
+    sym = generate_symbol("DUAL", pins, unit_count=2)
+    reference = re.search(r'property "Reference" "U"\s+\(at 0 ([\d.-]+)', sym)
+    value = re.search(r'property "Value" "DUAL"\s+\(at 0 ([\d.-]+)', sym)
+    assert reference is not None and float(reference.group(1)) > 15.0
+    assert value is not None and float(value.group(1)) < -15.0
+
+
 # ---------------------------------------------------------------------------
 # Edge cases
 # ---------------------------------------------------------------------------

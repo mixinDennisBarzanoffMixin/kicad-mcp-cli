@@ -136,6 +136,7 @@ def validate_chip_footprint(
 # (e.g. SOIC-8, LQFP-48, QFN-32, TSSOP-20, PDIP-16). Longest names must be tried
 # first so "TSSOP" wins over "SOP"/"SO" and "SDIP" wins over "DIP".
 _PIN_COUNT_FAMILIES = (
+    "LCC-LGA",
     "HTSSOP",
     "TSSOP",
     "VSSOP",
@@ -192,8 +193,10 @@ def expected_pin_count_from_package(footprint_name: str) -> int | None:
     """Return the pin count a footprint's package name implies, or ``None``.
 
     Strips any ``Library:`` prefix. Returns ``None`` for packages whose name does
-    not unambiguously encode a pin count (bare ``SOT-23``, grid-array BGA/LGA,
-    plain chip codes), so the cross-check stays silent unless it is confident.
+    not unambiguously encode a pin count (bare ``SOT-23``, generic grid-array
+    BGA/LGA names, plain chip codes), so the cross-check stays silent unless it
+    is confident. Combined ``LCC-LGA-<count>`` module names are explicit and
+    therefore certifiable.
     """
     base = footprint_name.split(":")[-1]
     code_first = _CODE_FIRST_RE.search(base)
