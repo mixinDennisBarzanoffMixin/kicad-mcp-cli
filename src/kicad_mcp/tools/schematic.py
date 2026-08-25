@@ -5045,6 +5045,7 @@ def _transactional_write_to_schematic_file(
         sch_file = sch_file.resolve()
         current = sch_file.read_text(encoding="utf-8")
         updated = _normalize_schematic_wire_connectivity(mutator(current))
+        updated = re.sub(r"(?m)^[ \t]+$", "", updated)
         _validate_schematic_text(updated)
         _guard_schematic_structural_loss(
             sch_file, current, updated, allow_node_loss=allow_node_loss

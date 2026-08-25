@@ -7,6 +7,7 @@ regex/string mutation that cloned a block instead of minting a fresh UUID.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -152,6 +153,17 @@ def test_transactional_write_preserves_fragile_constructs_on_additive_edit(tmp_p
     for marker in ("GLOBAL", "HIER", "power:GND", "(bus", "(bus_entry", "Sheetname"):
         assert marker in updated
     assert updated.count("(wire") == original.count("(wire") + 1
+
+
+def test_transactional_write_removes_whitespace_only_lines(tmp_path: Path) -> None:
+    path = _write_schematic(tmp_path)
+
+    def add_whitespace_lines(text: str) -> str:
+        return text.replace("  (sheet_instances", "\t\n   \n  (sheet_instances", 1)
+
+    transactional_write(add_whitespace_lines, path)
+
+    assert re.search(r"(?m)^[ \t]+$", path.read_text(encoding="utf-8")) is None
 
 
 def test_transactional_write_refuses_unintentional_structural_loss_and_preserves_original(
