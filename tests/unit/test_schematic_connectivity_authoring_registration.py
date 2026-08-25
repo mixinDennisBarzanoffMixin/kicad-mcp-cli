@@ -67,6 +67,14 @@ class FakeConnectivityAuthoringService:
         self.calls.append(("add_missing_junctions", {}))
         return "junctions"
 
+    def prune_orphan_junctions(
+        self,
+        sheet: str | None = None,
+        sheet_file: str | None = None,
+    ) -> str:
+        self.calls.append(("prune_orphan_junctions", {"sheet": sheet, "sheet_file": sheet_file}))
+        return "pruned"
+
 
 def _registered() -> tuple[FastMCP, FakeConnectivityAuthoringService]:
     server = FastMCP("schematic-connectivity-authoring-test")
@@ -83,6 +91,7 @@ def test_registration_preserves_names_descriptions_and_schemas() -> None:
         "sch_add_pin_labels",
         "sch_route_wire_between_pins",
         "sch_add_missing_junctions",
+        "sch_prune_orphan_junctions",
     }
     assert tools["sch_add_pin_labels"].description == (
         "Connect placed-symbol pins to nets with a short outward wire stub plus a\n"
@@ -94,6 +103,10 @@ def test_registration_preserves_names_descriptions_and_schemas() -> None:
         "other nets get labels. Pins that share a ``net`` are joined by their\n"
         "common terminal name. This is the clean alternative to placing bare\n"
         "labels directly on pins.\n\n"
+        'A connection may set ``"direction"`` to ``"left"``, ``"right"`,\n'
+        '``"up"``, or ``"down"`` to override automatic outward-direction\n'
+        "inference. This is useful for single-row two-pin devices such as diodes,\n"
+        "whose topology is ambiguous without symbol-body geometry.\n\n"
         "``label_kind`` selects the emitted label type for non-power nets:\n"
         '``"local"``, ``"global"``, or ``"hierarchical"``. When set it takes\n'
         "precedence over the legacy ``global_labels`` boolean, enabling batch\n"
@@ -106,6 +119,11 @@ def test_registration_preserves_names_descriptions_and_schemas() -> None:
     )
     assert tools["sch_add_missing_junctions"].description == (
         "Insert missing schematic junctions at T-intersection wire endpoints."
+    )
+    assert tools["sch_prune_orphan_junctions"].description == (
+        "Remove stale junctions that touch fewer than two wire segments.\n\n"
+        "Valid T intersections, crosses, and junctions joining two wire segments\n"
+        "are retained.\n"
     )
 
     assert tools["sch_add_pin_labels"].parameters == {
@@ -162,6 +180,22 @@ def test_registration_preserves_names_descriptions_and_schemas() -> None:
         "title": "sch_add_missing_junctionsArguments",
         "type": "object",
     }
+    assert tools["sch_prune_orphan_junctions"].parameters == {
+        "properties": {
+            "sheet": {
+                "anyOf": [{"type": "string"}, {"type": "null"}],
+                "default": None,
+                "title": "Sheet",
+            },
+            "sheet_file": {
+                "anyOf": [{"type": "string"}, {"type": "null"}],
+                "default": None,
+                "title": "Sheet File",
+            },
+        },
+        "title": "sch_prune_orphan_junctionsArguments",
+        "type": "object",
+    }
     for name, tool in tools.items():
         assert tool.output_schema == {
             "properties": {"result": {"title": "Result", "type": "string"}},
@@ -184,6 +218,10 @@ def test_registration_preserves_headless_metadata() -> None:
     assert junctions is not None
     assert junctions.headless_compatible is True
     assert junctions.requires_kicad_running is False
+    prune = metadata["sch_prune_orphan_junctions"]
+    assert prune is not None
+    assert prune.headless_compatible is True
+    assert prune.requires_kicad_running is False
 
 
 def test_registration_delegates_exact_arguments() -> None:
@@ -211,6 +249,13 @@ def test_registration_delegates_exact_arguments() -> None:
         == "routed"
     )
     assert tools["sch_add_missing_junctions"].fn() == "junctions"
+    assert (
+        tools["sch_prune_orphan_junctions"].fn(
+            sheet=None,
+            sheet_file="power.kicad_sch",
+        )
+        == "pruned"
+    )
 
     assert service.calls == [
         (
@@ -235,4 +280,8 @@ def test_registration_delegates_exact_arguments() -> None:
             },
         ),
         ("add_missing_junctions", {}),
+        (
+            "prune_orphan_junctions",
+            {"sheet": None, "sheet_file": "power.kicad_sch"},
+        ),
     ]

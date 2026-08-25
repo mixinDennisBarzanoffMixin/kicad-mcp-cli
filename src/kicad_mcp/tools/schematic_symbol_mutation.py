@@ -56,8 +56,16 @@ def register(mcp: FastMCP, dependencies: SchematicSymbolMutationDependencies) ->
         x_mm: float,
         y_mm: float,
         snap_to_grid: bool = True,
+        sheet: str | None = None,
+        sheet_file: str | None = None,
+        with_terminals: bool = False,
     ) -> str:
-        """Move an existing symbol instance to a new absolute coordinate."""
+        """Move a symbol, optionally carrying its isolated label/power stubs.
+
+        Set ``with_terminals=True`` after ``sch_add_pin_labels``. The move is
+        refused if an attached wire ends on another component or participates
+        in a larger wire graph, preventing silent disconnection.
+        """
         payload = MoveSymbolInput(
             reference=reference,
             x_mm=x_mm,
@@ -69,4 +77,7 @@ def register(mcp: FastMCP, dependencies: SchematicSymbolMutationDependencies) ->
             payload.x_mm,
             payload.y_mm,
             payload.snap_to_grid,
+            sheet=sheet,
+            sheet_file=sheet_file,
+            with_terminals=with_terminals,
         )

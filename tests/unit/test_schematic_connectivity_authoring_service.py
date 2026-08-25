@@ -162,6 +162,9 @@ def _harness(
         get_symbol_bboxes=lambda content: [FakeBoundingBox()],
         route_avoiding_obstacles=route,
         run_auto_add_missing_junctions=lambda: "Inserted 2 missing junction(s).",
+        run_prune_orphan_junctions=lambda sheet, sheet_file: (
+            f"Pruned on {sheet or sheet_file or 'root'}."
+        ),
         snap_tolerance_mm=0.001,
     )
     return ServiceHarness(service=service, writes=writes, calls=calls)
@@ -197,6 +200,14 @@ def test_add_pin_labels_reports_invalid_and_missing_connections_without_write(
         "U404.1: reference not found"
     )
     assert harness.writes == []
+
+
+def test_prune_orphan_junctions_delegates_selected_child(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+
+    assert harness.service.prune_orphan_junctions(sheet_file="power.kicad_sch") == (
+        "Pruned on power.kicad_sch."
+    )
 
 
 def test_add_pin_labels_writes_signal_stub_and_target_detail(tmp_path: Path) -> None:

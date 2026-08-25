@@ -1301,6 +1301,59 @@ async def test_schematic_add_pin_labels_clears_vertical_symbol_value_text(
 
 
 @pytest.mark.anyio
+async def test_schematic_move_symbol_carries_isolated_terminal_stub(
+    sample_project, mock_kicad
+) -> None:
+    server = build_server("schematic")
+    await call_tool_text(
+        server,
+        "sch_add_symbol",
+        {
+            "library": "Device",
+            "symbol_name": "R",
+            "x_mm": 50.8,
+            "y_mm": 50.8,
+            "reference": "R9",
+            "value": "10k",
+            "snap_to_grid": False,
+        },
+    )
+    await call_tool_text(
+        server,
+        "sch_add_pin_labels",
+        {
+            "connections": [
+                {
+                    "reference": "R9",
+                    "pin": "1",
+                    "net": "MOVE_ME",
+                    "direction": "left",
+                }
+            ],
+            "stub_mm": 5.08,
+        },
+    )
+
+    result = await call_tool_text(
+        server,
+        "sch_move_symbol",
+        {
+            "reference": "R9",
+            "x_mm": 60.96,
+            "y_mm": 60.96,
+            "snap_to_grid": False,
+            "with_terminals": True,
+        },
+    )
+
+    assert "Moved 1 attached stub wire(s) and 1 terminal(s)." in result
+    schematic = (sample_project / "demo.kicad_sch").read_text(encoding="utf-8")
+    assert '(global_label "MOVE_ME"' in schematic
+    assert "(at 53.34 60.96" in schematic
+    assert "(xy 53.34 60.96) (xy 58.42 60.96)" in schematic
+
+
+@pytest.mark.anyio
 async def test_schematic_add_pin_labels_dense_ic_preserves_pin_rows(
     sample_project, mock_kicad
 ) -> None:

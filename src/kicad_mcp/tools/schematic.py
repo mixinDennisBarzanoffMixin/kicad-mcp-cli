@@ -2797,6 +2797,64 @@ def run_auto_add_missing_junctions() -> str:
     return f"Inserted {inserted} missing junction(s)."
 
 
+def run_prune_orphan_junctions(
+    sheet: str | None = None,
+    sheet_file: str | None = None,
+) -> str:
+    """Remove junction markers touched by fewer than two wire segments."""
+    target = _resolve_schematic_target(sheet=sheet, sheet_file=sheet_file)
+    removed = 0
+
+    def point_on_segment(
+        point: tuple[float, float],
+        segment: tuple[float, float, float, float],
+    ) -> bool:
+        px, py = point
+        x1, y1, x2, y2 = segment
+        tolerance = 1e-4
+        cross = (px - x1) * (y2 - y1) - (py - y1) * (x2 - x1)
+        if abs(cross) > tolerance:
+            return False
+        return (
+            min(x1, x2) - tolerance <= px <= max(x1, x2) + tolerance
+            and min(y1, y2) - tolerance <= py <= max(y1, y2) + tolerance
+        )
+
+    def mutator(current: str) -> str:
+        nonlocal removed
+        segments = _deduplicate_segments(_wire_segments_from_content(current))
+        pieces: list[str] = []
+        cursor = 0
+        last = 0
+        while cursor < len(current):
+            if current[cursor:].startswith("(junction"):
+                block, length = _extract_block(current, cursor)
+                match = re.search(
+                    rf"\(at\s+({_FLOAT_PATTERN})\s+({_FLOAT_PATTERN})(?:\s+{_FLOAT_PATTERN})?\)",
+                    block,
+                )
+                if match is not None:
+                    point = (float(match.group(1)), float(match.group(2)))
+                    touching = sum(1 for segment in segments if point_on_segment(point, segment))
+                    if touching < 2:
+                        pieces.append(current[last:cursor])
+                        cursor += length
+                        last = cursor
+                        removed += 1
+                        continue
+            cursor += 1
+        pieces.append(current[last:])
+        return re.sub(r"(?m)^[ \t]+$", "", "".join(pieces))
+
+    _transactional_write_to_schematic_file(target.path, mutator, allow_node_loss=True)
+    reload_notice = (
+        _reload_schematic()
+        if target.is_root
+        else "Child schematic updated; reload it in KiCad if open."
+    )
+    return f"{reload_notice}\nPruned {removed} orphan junction(s).\nTarget schematic: {target.path}"
+
+
 def _get_symbol_library_dir() -> Path:
     cfg = get_config()
     if cfg.symbol_library_dir is None or not cfg.symbol_library_dir.exists():
@@ -5557,6 +5615,140 @@ def _shift_symbol_block(block: str, dx_mm: float, dy_mm: float) -> str:
     return at_pattern.sub(repl, block)
 
 
+def _shift_xy_points_in_block(block: str, dx_mm: float, dy_mm: float) -> str:
+    """Translate every schematic ``(xy x y)`` point in a wire block."""
+    xy_pattern = re.compile(rf"(\(xy\s+)({_FLOAT_PATTERN})\s+({_FLOAT_PATTERN})(\))")
+
+    def repl(match: re.Match[str]) -> str:
+        shifted_x = float(match.group(2)) + dx_mm
+        shifted_y = float(match.group(3)) + dy_mm
+        return f"{match.group(1)}{_fmt_mm(shifted_x)} {_fmt_mm(shifted_y)}{match.group(4)}"
+
+    return xy_pattern.sub(repl, block)
+
+
+def _shift_connected_symbol_bundle(
+    content: str,
+    reference: str,
+    dx_mm: float,
+    dy_mm: float,
+) -> tuple[str, int, int]:
+    """Move a symbol plus isolated one-segment label/power terminal stubs.
+
+    This intentionally refuses general schematic routing. Every wire attached to
+    the symbol must end at a label or power symbol, and no unrelated wire may
+    share that terminal coordinate. That makes the operation safe for the
+    terminal topology emitted by ``sch_add_pin_labels``.
+    """
+    target = _find_placed_symbol_block(content, reference)
+    if target is None:
+        raise ValueError(f"Reference '{reference}' was not found in the schematic.")
+    target_block, target_start, target_end, target_parsed = target
+    pin_points = _symbol_connection_points(target_parsed)
+
+    terminal_blocks: dict[tuple[float, float], list[tuple[int, int, str, str]]] = {}
+    cursor = 0
+    while cursor < len(content):
+        if content[cursor:].startswith(("(label", "(global_label", "(hierarchical_label")):
+            block, length = _extract_block(content, cursor)
+            parsed = _parse_label_block(block) if block else None
+            if parsed is not None:
+                key = _coord_pair_key(parsed["x"], parsed["y"])
+                terminal_blocks.setdefault(key, []).append(
+                    (cursor, cursor + length, block, "label")
+                )
+            cursor += max(length, 1)
+            continue
+        if content[cursor:].startswith("(symbol"):
+            block, length = _extract_block(content, cursor)
+            parsed = _parse_symbol_block(block) if block else None
+            if (
+                parsed is not None
+                and str(parsed.get("reference", "")) != reference
+                and str(parsed.get("lib_id", "")).startswith("power:")
+            ):
+                key = _coord_pair_key(parsed["x"], parsed["y"])
+                terminal_blocks.setdefault(key, []).append(
+                    (cursor, cursor + length, block, "power")
+                )
+            cursor += max(length, 1)
+            continue
+        cursor += 1
+
+    wires: list[tuple[int, int, str, dict[str, Any]]] = []
+    cursor = 0
+    while cursor < len(content):
+        if content[cursor:].startswith("(wire"):
+            block, length = _extract_block(content, cursor)
+            parsed = _parse_wire_block(block) if block else None
+            if parsed is not None:
+                wires.append((cursor, cursor + length, block, parsed))
+            cursor += max(length, 1)
+            continue
+        cursor += 1
+
+    attached: list[tuple[int, int, str, dict[str, Any], tuple[float, float]]] = []
+    for start, end, block, parsed in wires:
+        first = _coord_pair_key(parsed["x1"], parsed["y1"])
+        second = _coord_pair_key(parsed["x2"], parsed["y2"])
+        first_attached = first in pin_points
+        second_attached = second in pin_points
+        if first_attached and second_attached:
+            raise ValueError(
+                f"Cannot move '{reference}' with terminals: an attached wire joins two of its pins."
+            )
+        if first_attached or second_attached:
+            terminal = second if first_attached else first
+            attached.append((start, end, block, parsed, terminal))
+
+    if not attached:
+        shifted = _shift_symbol_block(target_block, dx_mm=dx_mm, dy_mm=dy_mm)
+        return content[:target_start] + shifted + content[target_end:], 0, 0
+
+    attached_wire_ranges = {(start, end) for start, end, *_rest in attached}
+    moved_terminal_blocks: dict[tuple[int, int], tuple[str, str]] = {}
+    for _start, _end, _block, _parsed, terminal in attached:
+        candidates = terminal_blocks.get(terminal, [])
+        if len(candidates) != 1:
+            raise ValueError(
+                f"Cannot move '{reference}' with terminals: endpoint {terminal} has "
+                f"{len(candidates)} label/power terminals (expected exactly one)."
+            )
+        terminal_start, terminal_end, terminal_block, kind = candidates[0]
+        for wire_start, wire_end, _wire_block, wire_parsed in wires:
+            if (wire_start, wire_end) in attached_wire_ranges:
+                continue
+            first = _coord_pair_key(wire_parsed["x1"], wire_parsed["y1"])
+            second = _coord_pair_key(wire_parsed["x2"], wire_parsed["y2"])
+            if terminal in {first, second}:
+                raise ValueError(
+                    f"Cannot move '{reference}' with terminals: endpoint {terminal} "
+                    "participates in another wire."
+                )
+        moved_terminal_blocks[(terminal_start, terminal_end)] = (terminal_block, kind)
+
+    replacements: dict[tuple[int, int], str] = {
+        (target_start, target_end): _shift_symbol_block(
+            target_block,
+            dx_mm=dx_mm,
+            dy_mm=dy_mm,
+        )
+    }
+    for start, end, block, _parsed, _terminal in attached:
+        replacements[(start, end)] = _shift_xy_points_in_block(block, dx_mm, dy_mm)
+    for bounds, (block, kind) in moved_terminal_blocks.items():
+        replacements[bounds] = (
+            _shift_symbol_block(block, dx_mm=dx_mm, dy_mm=dy_mm)
+            if kind == "power"
+            else _shift_at_in_block(block, dx_mm, dy_mm)
+        )
+
+    updated = content
+    for (start, end), replacement in sorted(replacements.items(), reverse=True):
+        updated = updated[:start] + replacement + updated[end:]
+    return updated, len(attached), len(moved_terminal_blocks)
+
+
 def _symbol_connection_points(parsed: dict[str, Any]) -> set[tuple[float, float]]:
     points = {_coord_pair_key(parsed["x"], parsed["y"])}
     lib_id = str(parsed.get("lib_id", ""))
@@ -5988,6 +6180,11 @@ def _register_authoring(mcp: FastMCP) -> None:
         transactional_write=transactional_write,
         find_placed_symbol_block=_find_placed_symbol_block,
         shift_symbol_block=_shift_symbol_block,
+        resolve_schematic_file=lambda sheet, sheet_file: (
+            _resolve_schematic_target(sheet=sheet, sheet_file=sheet_file).path
+        ),
+        transactional_write_to_file=_transactional_write_to_schematic_file,
+        shift_connected_bundle=_shift_connected_symbol_bundle,
     )
     schematic_symbol_mutation.register(
         mcp,
@@ -6137,6 +6334,7 @@ def _register_authoring(mcp: FastMCP) -> None:
         get_symbol_bboxes=_connectivity_symbol_bboxes,
         route_avoiding_obstacles=_connectivity_route_avoiding_obstacles,
         run_auto_add_missing_junctions=run_auto_add_missing_junctions,
+        run_prune_orphan_junctions=run_prune_orphan_junctions,
         snap_tolerance_mm=SNAP_TOLERANCE_MM,
     )
     schematic_connectivity_authoring.register(

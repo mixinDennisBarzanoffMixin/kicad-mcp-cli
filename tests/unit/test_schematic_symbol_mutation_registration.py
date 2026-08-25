@@ -29,8 +29,24 @@ class FakeSymbolMutationService:
         x_mm: float,
         y_mm: float,
         snap_to_grid: bool,
+        sheet: str | None = None,
+        sheet_file: str | None = None,
+        with_terminals: bool = False,
     ) -> str:
-        self.calls.append(("move_symbol", (reference, x_mm, y_mm, snap_to_grid)))
+        self.calls.append(
+            (
+                "move_symbol",
+                (
+                    reference,
+                    x_mm,
+                    y_mm,
+                    snap_to_grid,
+                    sheet,
+                    sheet_file,
+                    with_terminals,
+                ),
+            )
+        )
         return "moved"
 
 
@@ -62,7 +78,10 @@ def test_registration_preserves_names_descriptions_and_schemas() -> None:
         "Modify a schematic symbol property by reference."
     )
     assert tools["sch_move_symbol"].description == (
-        "Move an existing symbol instance to a new absolute coordinate."
+        "Move a symbol, optionally carrying its isolated label/power stubs.\n\n"
+        "Set ``with_terminals=True`` after ``sch_add_pin_labels``. The move is\n"
+        "refused if an attached wire ends on another component or participates\n"
+        "in a larger wire graph, preventing silent disconnection.\n"
     )
     assert tools["sch_update_properties"].parameters["required"] == [
         "reference",
@@ -106,7 +125,7 @@ def test_registration_delegates_and_preserves_modify_alias() -> None:
         ("update_properties", ("R1", "Value", "10k")),
         ("set_dnp", ("R2", False, "variant")),
         ("update_properties", ("R3", "MPN", "ABC")),
-        ("move_symbol", ("U1", 10.0, 20.0, False)),
+        ("move_symbol", ("U1", 10.0, 20.0, False, None, None, False)),
     ]
 
 

@@ -298,6 +298,7 @@ TOOL_CATEGORIES: dict[str, ToolCategory] = {
             "sch_get_pin_positions",
             "sch_route_wire_between_pins",
             "sch_add_missing_junctions",
+            "sch_prune_orphan_junctions",
             "sch_get_connectivity_graph",
             "sch_trace_net",
             "sch_auto_place_symbols",

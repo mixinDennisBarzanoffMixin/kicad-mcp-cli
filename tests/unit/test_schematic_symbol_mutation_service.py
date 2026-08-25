@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from kicad_mcp.schematic.symbol_mutation import SchematicSymbolMutationService
@@ -35,6 +36,8 @@ def _service(
     ),
     snap_result: tuple[float, float] = (10.16, 20.32),
     snap_message: str = "Snapped to the schematic grid.",
+    child_transaction: Callable[..., str] | None = None,
+    shift_connected_bundle: Callable[[str, str, float, float], tuple[str, int, int]] | None = None,
 ) -> SchematicSymbolMutationService:
     records = events if events is not None else []
     tx = transaction or _TransactionRecorder()
@@ -82,6 +85,9 @@ def _service(
         transactional_write=tx,
         find_placed_symbol_block=find_symbol,
         shift_symbol_block=shift_symbol,
+        resolve_schematic_file=lambda _sheet, sheet_file: Path(sheet_file or "child.kicad_sch"),
+        transactional_write_to_file=child_transaction,
+        shift_connected_bundle=shift_connected_bundle,
     )
 
 
@@ -149,3 +155,47 @@ def test_move_symbol_preserves_missing_reference_as_result_without_reload() -> N
     assert transaction.calls == [False]
     assert transaction.updated is None
     assert ("reload", ()) not in events
+
+
+def test_move_symbol_can_carry_child_sheet_terminal_bundle() -> None:
+    writes: list[tuple[Path, bool]] = []
+
+    def child_write(
+        path: Path,
+        mutator: Callable[[str], str],
+        *,
+        allow_node_loss: bool = False,
+    ) -> str:
+        writes.append((path, allow_node_loss))
+        return mutator("aaSYMBOLzz")
+
+    bundle_calls: list[tuple[str, str, float, float]] = []
+
+    def shift_bundle(
+        current: str,
+        reference: str,
+        dx_mm: float,
+        dy_mm: float,
+    ) -> tuple[str, int, int]:
+        bundle_calls.append((current, reference, dx_mm, dy_mm))
+        return "BUNDLED", 2, 2
+
+    service = _service(
+        child_transaction=child_write,
+        shift_connected_bundle=shift_bundle,
+    )
+
+    result = service.move_symbol(
+        "U1",
+        10.0,
+        20.0,
+        True,
+        sheet_file="power.kicad_sch",
+        with_terminals=True,
+    )
+
+    assert "Child schematic updated" in result
+    assert "Target schematic: power.kicad_sch" in result
+    assert "Moved 2 attached stub wire(s) and 2 terminal(s)." in result
+    assert writes == [(Path("power.kicad_sch"), False)]
+    assert bundle_calls == [("aaSYMBOLzz", "U1", 9.16, 18.32)]

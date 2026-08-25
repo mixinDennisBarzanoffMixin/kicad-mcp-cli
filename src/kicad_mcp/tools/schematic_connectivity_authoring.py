@@ -87,3 +87,16 @@ def register(mcp: FastMCP, dependencies: SchematicConnectivityAuthoringDependenc
     def sch_add_missing_junctions() -> str:
         """Insert missing schematic junctions at T-intersection wire endpoints."""
         return service.add_missing_junctions()
+
+    @mcp.tool()
+    @headless_compatible
+    def sch_prune_orphan_junctions(
+        sheet: str | None = None,
+        sheet_file: str | None = None,
+    ) -> str:
+        """Remove stale junctions that touch fewer than two wire segments.
+
+        Valid T intersections, crosses, and junctions joining two wire segments
+        are retained.
+        """
+        return service.prune_orphan_junctions(sheet=sheet, sheet_file=sheet_file)

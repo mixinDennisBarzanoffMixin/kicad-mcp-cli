@@ -109,6 +109,7 @@ class SchematicConnectivityAuthoringService:
         tuple[list[WireSegment], str | None],
     ]
     run_auto_add_missing_junctions: Callable[[], str]
+    run_prune_orphan_junctions: Callable[[str | None, str | None], str]
     snap_tolerance_mm: float
 
     def add_pin_labels(
@@ -496,3 +497,11 @@ class SchematicConnectivityAuthoringService:
         summary = self.run_auto_add_missing_junctions()
         result = self.reload_schematic()
         return f"{result}\n{summary}"
+
+    def prune_orphan_junctions(
+        self,
+        sheet: str | None = None,
+        sheet_file: str | None = None,
+    ) -> str:
+        """Remove junction markers that no longer touch two wire segments."""
+        return self.run_prune_orphan_junctions(sheet, sheet_file)
