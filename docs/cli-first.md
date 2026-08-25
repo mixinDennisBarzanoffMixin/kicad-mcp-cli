@@ -3,7 +3,7 @@
 `kicadq` exposes the KiCad MCP backend as a normal Unix command. Standard output
 is reserved for data, errors go to standard error, and non-success states use
 stable exit codes (`0` success, `1` no match/tool failure, `2` usage/runtime
-error).
+error, `3` rejected/refused verification, `4` blocked planning).
 
 ## Discover and inspect
 
@@ -36,7 +36,8 @@ kicadq -C ./board grep GND --format lines | rg regulator
 
 The deep snapshot uses KiCad's XML netlist export plus the board file, so it sees
 hierarchical sheets, component/pin connectivity, placed pads, tracks, vias, and
-board geometry without requiring the GUI to be open.
+board geometry. When KiCad IPC is live, it also compares the open PCB semantically
+with the saved board and labels the authority used by every section.
 
 ```bash
 kicadq -C ./board inspect | jq '.schematic.counts, .board.counts'
@@ -47,12 +48,58 @@ kicadq -C ./board map --zoom 2 --net SPI    # pin-level nets
 kicadq -C ./board map --zoom 3 --width 120  # PCB geometry
 ```
 
+## Authority and proof
+
+Do not guess which representation is current. `backend` reports the exact
+authority for reads, writes, checks, renders, and exports. KiCad 10 uses native
+IPC for the open PCB, `kicad-cli` for netlist/ERC/DRC/render/export, and guarded
+file transactions only for schematic edits that the KiCad 10 IPC API does not
+expose.
+
+```bash
+kicadq -C ./board backend | jq '{status,authorities,live_ipc,policy}'
+kicadq -C ./board prove --sheet Power --format jsonl |
+  jq -c 'select(.section == "pin") | [.reference,.pin,.net,.peers]'
+kicadq -C ./board verify --sheet Power --artifacts build/power-proof |
+  jq '{status,checks,artifacts}'
+```
+
+`prove` expands every selected pin into `pin → net → peer pins`, separates
+intentional no-connects from accidental dangling pins, and compares PCB pad nets
+when a synchronized board exists. `verify` bundles source-integrity checks,
+connectivity proof, native KiCad ERC JSON, and hop-over SVG renders.
+
+## Atomic schematic edits
+
+Use `edit` instead of direct write calls for routine schematic authoring. It
+copies the project to a temporary staging directory, invokes one `sch_*` tool,
+generates a unified diff and before/after SVGs, rejects structural/connectivity
+failures or new ERC errors, then atomically promotes exactly one verified
+schematic file. A failed edit leaves the source project byte-for-byte unchanged.
+
+```bash
+kicadq -C ./board --mode write edit sch_modify_property \
+  --sheet Power \
+  --set reference=R7 \
+  --set field=Value \
+  --set value=100k \
+  --set sheet_file=02_Power.kicad_sch \
+  --yes | jq '{status,promoted,changed_files,diff,artifacts}'
+
+kicadq -C ./board --mode write edit sch_build_circuit \
+  --sheet Power --args @power-circuit.json --yes | jq '.status'
+```
+
+By default, evidence is written below
+`build/kicadq-transactions/<tool>-<id>/`; pass `--artifacts DIR` to choose a
+stable destination.
+
 Route planning is a dry run by default. It first tries direct Manhattan geometry,
 then uses a deterministic grid/A* search around footprint and existing-track
 obstacles. Critical power, ground, RF, clock, and USB differential nets are
 refused unless explicitly overridden. Applying a plan also requires write mode
 and a second confirmation flag; the live KiCad backend performs the actual track
-creation.
+creation. Planning is blocked when live IPC and the saved board differ.
 
 ```bash
 kicadq -C ./board route GPIO17 | jq '.segments'

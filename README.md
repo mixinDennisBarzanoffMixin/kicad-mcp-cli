@@ -94,6 +94,9 @@ uv run kicadq tools routing --format jsonl | jq -r '.name'
 uv run kicadq schema pcb_get_nets | jq '.input_schema'
 uv run kicadq -C ./board call pcb_get_nets --format raw | jq
 uv run kicadq -C ./board grep 'USB|VBUS' | jq -r '[.path,.line,.text] | @tsv'
+uv run kicadq -C ./board backend | jq '.authorities,.policy'
+uv run kicadq -C ./board prove --sheet Power | jq '.summary,.pins[]'
+uv run kicadq -C ./board verify --sheet Power --artifacts build/verify | jq '.status'
 uv run kicadq -C ./board map --zoom 3 --width 120
 uv run kicadq -C ./board place --fix J1 | jq '.placements'
 ```
