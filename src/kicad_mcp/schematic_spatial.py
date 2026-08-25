@@ -40,6 +40,7 @@ class SpatialLabel:
     x_mm: float
     y_mm: float
     rotation: int
+    uuid: str = ""
 
 
 @dataclass(frozen=True)
@@ -145,6 +146,7 @@ def parse_schematic_geometry(text: str) -> SchematicGeometry:
             name = re.match(rf"\({kind}\s+{_STRING}", block)
             at = _root_at(block)
             if name is not None and at is not None:
+                uuid_match = re.search(r'\(uuid\s+"([^"]+)"\)', block)
                 labels.append(
                     SpatialLabel(
                         name=_unescape(name.group(1)),
@@ -152,6 +154,7 @@ def parse_schematic_geometry(text: str) -> SchematicGeometry:
                         x_mm=at[0],
                         y_mm=at[1],
                         rotation=at[2],
+                        uuid=uuid_match.group(1) if uuid_match else "",
                     )
                 )
         elif kind == "wire":
@@ -168,7 +171,8 @@ def parse_schematic_geometry(text: str) -> SchematicGeometry:
     )
 
 
-def _select_sheet(snapshot: JsonRecord, sheet: str, center_reference: str) -> JsonRecord:
+def select_schematic_sheet(snapshot: JsonRecord, sheet: str, center_reference: str) -> JsonRecord:
+    """Resolve exactly one saved page by sheet substring or component reference."""
     sheets = list(snapshot["schematic"]["sheets"])
     if sheet:
         query = sheet.casefold()
@@ -318,7 +322,7 @@ def schematic_spatial_map(
         raise ValueError("zoom must be between 0 and 3")
     columns = max(48, min(int(width), 200))
     rows = max(12, min(int(height), 80))
-    selected_sheet = _select_sheet(snapshot, sheet, center_reference)
+    selected_sheet = select_schematic_sheet(snapshot, sheet, center_reference)
     source = Path(project_dir).expanduser().resolve() / str(selected_sheet["file"])
     if not source.is_file():
         raise FileNotFoundError(f"schematic page is missing: {source}")

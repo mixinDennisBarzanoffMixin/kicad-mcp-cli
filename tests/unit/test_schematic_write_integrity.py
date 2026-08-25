@@ -15,6 +15,7 @@ import pytest
 from kicad_mcp.errors import SchematicWriteUnsafeError
 from kicad_mcp.tools.schematic import (
     _duplicate_uuids,
+    _normalize_schematic_wire_connectivity,
     _validate_schematic_text,
     transactional_write,
 )
@@ -192,3 +193,35 @@ def test_transactional_write_requires_explicit_opt_in_for_destructive_edits(tmp_
 
     transactional_write(delete_local_label, path, allow_node_loss=True)
     assert "LOCAL" not in path.read_text(encoding="utf-8")
+
+
+def test_transactional_write_allows_connectivity_equivalent_wire_coalescing(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "coalesce.kicad_sch"
+    path.write_text(
+        '(kicad_sch (paper "A4") (lib_symbols)\n'
+        '  (label "RAIL" (at 0 0 0))\n'
+        '  (wire (pts (xy 0 0) (xy 5 0)) (uuid "10000000-0000-0000-0000-000000000001"))\n'
+        '  (wire (pts (xy 0 0) (xy 5 0)) (uuid "10000000-0000-0000-0000-000000000002"))\n'
+        ')\n',
+        encoding="utf-8",
+    )
+
+    transactional_write(lambda text: text, path)
+
+    assert path.read_text(encoding="utf-8").count("(wire") == 1
+
+
+def test_wire_normalization_preserves_intermediate_attachment_endpoints() -> None:
+    schematic = """(kicad_sch (paper "A4") (lib_symbols)
+      (wire (pts (xy 0 0) (xy 5 0)) (uuid "10000000-0000-0000-0000-000000000001"))
+      (wire (pts (xy 10 0) (xy 15 0)) (uuid "10000000-0000-0000-0000-000000000002"))
+      (wire (pts (xy 0 0) (xy 15 0)) (uuid "10000000-0000-0000-0000-000000000003"))
+    )"""
+
+    normalized = _normalize_schematic_wire_connectivity(schematic)
+
+    assert "(xy 0 0) (xy 5 0)" in normalized
+    assert "(xy 5 0) (xy 10 0)" in normalized
+    assert "(xy 10 0) (xy 15 0)" in normalized

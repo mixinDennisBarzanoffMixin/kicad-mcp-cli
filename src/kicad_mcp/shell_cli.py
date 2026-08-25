@@ -41,6 +41,7 @@ from .deep_inspection import (
     route_plan,
     verification_report,
 )
+from .schematic_rewire_plan import format_label_compaction_plan, plan_label_compaction
 from .schematic_spatial import schematic_spatial_map
 from .server import build_server
 from .tools.router import TOOL_CATEGORIES, available_profiles
@@ -837,6 +838,15 @@ def build_parser() -> argparse.ArgumentParser:
     map_command.add_argument("--net", default="")
     map_command.add_argument("--ref", dest="reference", default="")
 
+    compact_labels = subcommands.add_parser(
+        "plan-labels",
+        help="plan read-only local same-net label compaction around one component",
+    )
+    compact_labels.add_argument("--ref", dest="reference", required=True)
+    compact_labels.add_argument("--sheet", default="")
+    compact_labels.add_argument("--radius", type=float, default=35.0, dest="radius_mm")
+    compact_labels.add_argument("--format", choices=("json", "text"), default="text")
+
     route = subcommands.add_parser(
         "route", help="plan or apply a conservative PCB route for one net"
     )
@@ -1045,6 +1055,19 @@ def main(argv: Sequence[str] | None = None) -> None:
                 )
             else:
                 print(ascii_map(snapshot, zoom=args.zoom, width=args.width))
+            return
+        if args.command == "plan-labels":
+            report = plan_label_compaction(
+                project_snapshot(args.project_dir or "."),
+                args.project_dir or ".",
+                reference=args.reference,
+                sheet=args.sheet,
+                radius_mm=args.radius_mm,
+            )
+            if args.format == "json":
+                print(json.dumps(report, indent=2, sort_keys=True))
+            else:
+                print(format_label_compaction_plan(report))
             return
         if args.command == "route":
             plan = route_plan(

@@ -2416,12 +2416,67 @@ def _remove_wire_blocks(content: str) -> str:
     return "".join(pieces)
 
 
+def _split_wire_segments_at_points(
+    segments: list[tuple[float, float, float, float]],
+    points: set[tuple[float, float]],
+) -> list[tuple[float, float, float, float]]:
+    """Split normalized wires at existing electrical attachment coordinates.
+
+    Collinear interval merging is visually useful, but KiCad requires a wire
+    endpoint at an intermediate pin attachment. Preserve every pre-normalization
+    endpoint so adding a rail cannot silently strand pins that previously had
+    short stubs.
+    """
+
+    split: list[tuple[float, float, float, float]] = []
+    for x1, y1, x2, y2 in segments:
+        if abs(y1 - y2) <= SNAP_TOLERANCE_MM:
+            low, high = sorted((x1, x2))
+            cuts = sorted(
+                {
+                    low,
+                    high,
+                    *(
+                        x
+                        for x, y in points
+                        if abs(y - y1) <= SNAP_TOLERANCE_MM
+                        and low + SNAP_TOLERANCE_MM < x < high - SNAP_TOLERANCE_MM
+                    ),
+                }
+            )
+            split.extend((start, y1, end, y1) for start, end in zip(cuts, cuts[1:], strict=False))
+        elif abs(x1 - x2) <= SNAP_TOLERANCE_MM:
+            low, high = sorted((y1, y2))
+            cuts = sorted(
+                {
+                    low,
+                    high,
+                    *(
+                        y
+                        for x, y in points
+                        if abs(x - x1) <= SNAP_TOLERANCE_MM
+                        and low + SNAP_TOLERANCE_MM < y < high - SNAP_TOLERANCE_MM
+                    ),
+                }
+            )
+            split.extend((x1, start, x1, end) for start, end in zip(cuts, cuts[1:], strict=False))
+        else:
+            split.append((x1, y1, x2, y2))
+    return split
+
+
 def _normalize_schematic_wire_connectivity(content: str) -> str:
     wires = _extract_wires(content)
     segments = _wire_segments_from_content(content)
     deduped = _deduplicate_segments(segments)
     if not deduped:
         return content
+    attachment_points = {
+        _coord_pair_key(x, y)
+        for segment in segments
+        for x, y in ((segment[0], segment[1]), (segment[2], segment[3]))
+    }
+    deduped = _split_wire_segments_at_points(deduped, attachment_points)
     uuid_map: dict[tuple[float, float, float, float], str] = {}
     for w in wires:
         key = (w["x1"], w["y1"], w["x2"], w["y2"])
@@ -4640,6 +4695,27 @@ def _build_connectivity_groups(sch_file: Path) -> list[dict[str, Any]]:
     )
 
 
+def _connectivity_signature_for_text(
+    content: str,
+) -> frozenset[tuple[frozenset[str], frozenset[tuple[str, str]]]]:
+    """Return coordinate-independent net names and pin memberships for text."""
+
+    with NamedTemporaryFile("w", suffix=".kicad_sch", delete=False, encoding="utf-8") as handle:
+        handle.write(content)
+        temp_path = Path(handle.name)
+    try:
+        groups = _build_connectivity_groups(temp_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    return frozenset(
+        (
+            frozenset(str(name) for name in group["names"]),
+            frozenset((str(pin["reference"]), str(pin["pin"])) for pin in group["pins"]),
+        )
+        for group in groups
+    )
+
+
 def _project_name() -> str:
     cfg = get_config()
     if cfg.project_file is not None:
@@ -4953,6 +5029,11 @@ def _guard_schematic_structural_loss(
     lost = dropped_nodes(before, after)
     if not lost:
         return
+    if set(lost) == {"wire"}:
+        before_signature = _connectivity_signature_for_text(before)
+        after_signature = _connectivity_signature_for_text(after)
+        if before_signature == after_signature:
+            return
     detail = ", ".join(f"{kind} {b}->{a}" for kind, (b, a) in sorted(lost.items()))
     raise SchematicWriteUnsafeError(
         f"Refusing to write {sch_file.name}: the schematic mutation dropped structure "
