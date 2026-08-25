@@ -11,12 +11,16 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import difflib
+import hashlib
 import io
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
+import uuid
 from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -280,6 +284,190 @@ def _emit_call(payload: dict[str, JSONValue], output_format: str) -> None:
     print(json.dumps(payload, indent=indent, separators=separators, sort_keys=True))
 
 
+def _hash_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _schematic_manifest(root: Path) -> dict[Path, str]:
+    ignored_parts = {
+        ".git",
+        ".history",
+        ".kicad-mcp",
+        "build",
+        "output",
+        "tmp",
+        "__pycache__",
+    }
+    return {
+        path.relative_to(root): _hash_file(path)
+        for path in sorted(root.rglob("*.kicad_sch"))
+        if path.is_file() and not (set(path.relative_to(root).parts) & ignored_parts)
+    }
+
+
+def _erc_finding_keys(report: dict[str, Any]) -> set[str]:
+    findings = report["checks"]["erc"]["findings"]
+    return {
+        json.dumps(finding, sort_keys=True, separators=(",", ":"))
+        for finding in findings
+        if finding.get("severity") == "error"
+    }
+
+
+def _transaction_artifacts(root: Path, requested: str, tool_name: str) -> Path:
+    if requested:
+        return Path(requested).expanduser().resolve()
+    transaction = f"{tool_name}-{uuid.uuid4().hex[:10]}"
+    return root / "build" / "kicadq-transactions" / transaction
+
+
+async def run_staged_schematic_edit(args: argparse.Namespace) -> dict[str, Any]:
+    """Apply one schematic tool to a clone and promote it only after verification."""
+    if args.mode not in {"write", "experimental"}:
+        raise ValueError("edit requires --mode write or --mode experimental")
+    if not args.yes:
+        raise ValueError("edit requires --yes after reviewing the tool schema")
+    if not args.tool.startswith("sch_"):
+        raise ValueError("staged edit currently accepts only sch_* tools")
+    root = Path(args.project_dir or ".").expanduser().resolve()
+    before_manifest = _schematic_manifest(root)
+    if not before_manifest:
+        raise ValueError(f"no schematic files found in {root}")
+    artifacts = _transaction_artifacts(root, args.artifacts, args.tool)
+    before_report = verification_report(
+        root,
+        sheet=args.sheet,
+        reference=args.reference,
+        net=args.net,
+        artifacts_dir=artifacts / "before",
+    )
+    payload: dict[str, JSONValue]
+    changed: list[Path]
+    diff_text = ""
+    after_report: dict[str, Any]
+    with tempfile.TemporaryDirectory(prefix="kicadq-edit-") as temporary:
+        stage = Path(temporary) / root.name
+        shutil.copytree(
+            root,
+            stage,
+            ignore=shutil.ignore_patterns(
+                ".git",
+                ".history",
+                "build",
+                "output",
+                "tmp",
+                "__pycache__",
+                "*.bak",
+            ),
+        )
+        stage_args = argparse.Namespace(**vars(args))
+        stage_args.project_dir = str(stage)
+        payload = await invoke_backend_tool(stage_args, args.tool, parse_call_arguments(args))
+        if not payload["ok"]:
+            return {
+                "schema_version": "1.0",
+                "status": "rejected",
+                "promoted": False,
+                "reason": "backend rejected the staged edit",
+                "tool": args.tool,
+                "tool_result": payload,
+                "artifacts": str(artifacts),
+            }
+        stage_manifest = _schematic_manifest(stage)
+        if set(stage_manifest) != set(before_manifest):
+            added = sorted(str(item) for item in set(stage_manifest) - set(before_manifest))
+            removed = sorted(str(item) for item in set(before_manifest) - set(stage_manifest))
+            raise RuntimeError(
+                "staged edit added or removed schematic files; refusing promotion "
+                f"(added={added}, removed={removed})"
+            )
+        changed = [
+            relative
+            for relative in sorted(before_manifest)
+            if before_manifest[relative] != stage_manifest[relative]
+        ]
+        if len(changed) != 1:
+            raise RuntimeError(
+                f"staged edit must change exactly one schematic file; changed {len(changed)}"
+            )
+        relative = changed[0]
+        original_text = (root / relative).read_text(encoding="utf-8")
+        staged_text = (stage / relative).read_text(encoding="utf-8")
+        diff_text = "".join(
+            difflib.unified_diff(
+                original_text.splitlines(keepends=True),
+                staged_text.splitlines(keepends=True),
+                fromfile=f"before/{relative}",
+                tofile=f"after/{relative}",
+            )
+        )
+        artifacts.mkdir(parents=True, exist_ok=True)
+        diff_path = artifacts / "edit.diff"
+        diff_path.write_text(diff_text, encoding="utf-8")
+        after_report = verification_report(
+            stage,
+            sheet=args.sheet,
+            reference=args.reference,
+            net=args.net,
+            artifacts_dir=artifacts / "after",
+        )
+        source_ok = after_report["checks"]["source_integrity"]["status"] == "pass"
+        connectivity_ok = after_report["checks"]["connectivity"]["status"] != "fail"
+        new_erc_errors = sorted(_erc_finding_keys(after_report) - _erc_finding_keys(before_report))
+        if not source_ok or not connectivity_ok or new_erc_errors:
+            return {
+                "schema_version": "1.0",
+                "status": "rejected",
+                "promoted": False,
+                "reason": (
+                    "staged verification found corruption, connectivity failure, "
+                    "or new ERC errors"
+                ),
+                "tool": args.tool,
+                "tool_result": payload,
+                "changed_files": [str(relative)],
+                "new_erc_errors": [json.loads(item) for item in new_erc_errors],
+                "before": before_report,
+                "after": after_report,
+                "artifacts": str(artifacts),
+                "diff": str(diff_path),
+            }
+        if _hash_file(root / relative) != before_manifest[relative]:
+            raise RuntimeError(f"source changed during staged verification: {relative}")
+        backup = (root / relative).read_bytes()
+        promotion = (root / relative).with_suffix(f"{(root / relative).suffix}.kicadq-tmp")
+        try:
+            shutil.copy2(stage / relative, promotion)
+            os.replace(promotion, root / relative)
+            final_report = verification_report(
+                root,
+                sheet=args.sheet,
+                reference=args.reference,
+                net=args.net,
+            )
+            if _erc_finding_keys(final_report) != _erc_finding_keys(after_report):
+                raise RuntimeError("promoted project does not reproduce staged ERC evidence")
+        except Exception:
+            (root / relative).write_bytes(backup)
+            if promotion.exists():
+                promotion.unlink()
+            raise
+
+    return {
+        "schema_version": "1.0",
+        "status": "pass" if after_report["status"] == "pass" else "review",
+        "promoted": True,
+        "tool": args.tool,
+        "tool_result": payload,
+        "changed_files": [str(item) for item in changed],
+        "before": before_report,
+        "after": after_report,
+        "artifacts": str(artifacts),
+        "diff": str(artifacts / "edit.diff"),
+        "diff_lines": len(diff_text.splitlines()),
+    }
+
+
 def _rg_binary() -> str:
     binary = shutil.which("rg")
     if binary is None:
@@ -405,6 +593,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     call.add_argument("--format", choices=("json", "jsonl", "raw"), default="json")
 
+    edit = subcommands.add_parser(
+        "edit", help="stage, diff, verify, and atomically promote one schematic mutation"
+    )
+    edit.add_argument("tool", help="one sch_* backend tool")
+    edit.add_argument(
+        "--args",
+        dest="args_json",
+        default="",
+        help="JSON object, '-' for stdin, or @path/to/file.json",
+    )
+    edit.add_argument(
+        "--set",
+        dest="set_values",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="merge one JSON value; repeatable",
+    )
+    edit.add_argument("--sheet", required=True, help="sheet substring used for verification")
+    edit.add_argument("--net", default="", help="optional net filter for connectivity proof")
+    edit.add_argument("--ref", dest="reference", default="", help="optional reference filter")
+    edit.add_argument("--artifacts", default="", metavar="DIR")
+    edit.add_argument("--yes", action="store_true", help="confirm promotion after staged checks")
+    edit.add_argument("--format", choices=("json", "jsonl"), default="json")
+
     files = subcommands.add_parser("files", help="emit a KiCad project file manifest")
     files.add_argument("paths", nargs="*")
     files.add_argument("--format", choices=("json", "jsonl", "names"), default="jsonl")
@@ -522,6 +735,15 @@ def main(argv: Sequence[str] | None = None) -> None:
             _emit_call(payload, args.format)
             if not payload["ok"]:
                 raise SystemExit(1)
+            return
+        if args.command == "edit":
+            report = asyncio.run(run_staged_schematic_edit(args))
+            if args.format == "jsonl":
+                print(json.dumps(report, separators=(",", ":"), sort_keys=True))
+            else:
+                print(json.dumps(report, indent=2, sort_keys=True))
+            if not report["promoted"]:
+                raise SystemExit(3)
             return
         if args.command == "files":
             records = list(file_records(args))

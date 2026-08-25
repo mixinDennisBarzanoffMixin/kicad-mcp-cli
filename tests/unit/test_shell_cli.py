@@ -18,7 +18,12 @@ from kicad_mcp.deep_inspection import (
     placement_plan,
     route_plan,
 )
-from kicad_mcp.shell_cli import parse_call_arguments, result_envelope
+from kicad_mcp.shell_cli import (
+    _erc_finding_keys,
+    _schematic_manifest,
+    parse_call_arguments,
+    result_envelope,
+)
 
 
 def test_parse_call_arguments_merges_json_and_set_values() -> None:
@@ -33,6 +38,31 @@ def test_parse_call_arguments_merges_json_and_set_values() -> None:
         "enabled": True,
         "label": "USB",
     }
+
+
+def test_schematic_manifest_ignores_generated_history(tmp_path: Path) -> None:
+    source = tmp_path / "power.kicad_sch"
+    source.write_text("source", encoding="utf-8")
+    history = tmp_path / ".history"
+    history.mkdir()
+    (history / "power.kicad_sch").write_text("backup", encoding="utf-8")
+
+    assert list(_schematic_manifest(tmp_path)) == [Path("power.kicad_sch")]
+
+
+def test_erc_finding_keys_only_tracks_errors() -> None:
+    report = {
+        "checks": {
+            "erc": {
+                "findings": [
+                    {"severity": "warning", "type": "warn"},
+                    {"severity": "error", "type": "broken"},
+                ]
+            }
+        }
+    }
+
+    assert _erc_finding_keys(report) == {'{"severity":"error","type":"broken"}'}
 
 
 def test_result_envelope_preserves_structured_and_text_content() -> None:
