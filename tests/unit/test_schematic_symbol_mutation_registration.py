@@ -15,8 +15,15 @@ class FakeSymbolMutationService:
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[object, ...]]] = []
 
-    def update_properties(self, reference: str, field: str, value: str) -> str:
-        self.calls.append(("update_properties", (reference, field, value)))
+    def update_properties(
+        self,
+        reference: str,
+        field: str,
+        value: str,
+        sheet: str | None = None,
+        sheet_file: str | None = None,
+    ) -> str:
+        self.calls.append(("update_properties", (reference, field, value, sheet, sheet_file)))
         return "updated"
 
     def set_dnp(self, reference: str, enabled: bool, reason: str | None) -> str:
@@ -122,9 +129,9 @@ def test_registration_delegates_and_preserves_modify_alias() -> None:
     assert tools["sch_modify_property"].fn("R3", "MPN", "ABC") == "updated"
     assert tools["sch_move_symbol"].fn("U1", 10.0, 20.0, False) == "moved"
     assert service.calls == [
-        ("update_properties", ("R1", "Value", "10k")),
+        ("update_properties", ("R1", "Value", "10k", None, None)),
         ("set_dnp", ("R2", False, "variant")),
-        ("update_properties", ("R3", "MPN", "ABC")),
+        ("update_properties", ("R3", "MPN", "ABC", None, None)),
         ("move_symbol", ("U1", 10.0, 20.0, False, None, None, False)),
     ]
 

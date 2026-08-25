@@ -24,9 +24,21 @@ def register(mcp: FastMCP, dependencies: SchematicSymbolMutationDependencies) ->
 
     @mcp.tool()
     @headless_compatible
-    def sch_update_properties(reference: str, field: str, value: str) -> str:
+    def sch_update_properties(
+        reference: str,
+        field: str,
+        value: str,
+        sheet: str | None = None,
+        sheet_file: str | None = None,
+    ) -> str:
         """Update a property on a placed symbol."""
-        return service.update_properties(reference, field, value)
+        return service.update_properties(
+            reference,
+            field,
+            value,
+            sheet=sheet,
+            sheet_file=sheet_file,
+        )
 
     @mcp.tool()
     @headless_compatible
@@ -45,9 +57,23 @@ def register(mcp: FastMCP, dependencies: SchematicSymbolMutationDependencies) ->
 
     @mcp.tool()
     @headless_compatible
-    def sch_modify_property(reference: str, field: str, value: str) -> str:
+    def sch_modify_property(
+        reference: str,
+        field: str,
+        value: str,
+        sheet: str | None = None,
+        sheet_file: str | None = None,
+    ) -> str:
         """Modify a schematic symbol property by reference."""
-        return str(service.update_properties(reference, field, value))
+        return str(
+            service.update_properties(
+                reference,
+                field,
+                value,
+                sheet=sheet,
+                sheet_file=sheet_file,
+            )
+        )
 
     @mcp.tool()
     @headless_compatible

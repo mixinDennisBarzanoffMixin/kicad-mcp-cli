@@ -38,6 +38,7 @@ def _service(
     snap_message: str = "Snapped to the schematic grid.",
     child_transaction: Callable[..., str] | None = None,
     shift_connected_bundle: Callable[[str, str, float, float], tuple[str, int, int]] | None = None,
+    update_symbol_property_in_file: Callable[[Path, str, str, str], str] | None = None,
 ) -> SchematicSymbolMutationService:
     records = events if events is not None else []
     tx = transaction or _TransactionRecorder()
@@ -88,6 +89,7 @@ def _service(
         resolve_schematic_file=lambda _sheet, sheet_file: Path(sheet_file or "child.kicad_sch"),
         transactional_write_to_file=child_transaction,
         shift_connected_bundle=shift_connected_bundle,
+        update_symbol_property_in_file=update_symbol_property_in_file,
     )
 
 
@@ -101,6 +103,33 @@ def test_update_properties_preserves_backend_then_reload_result() -> None:
     assert events == [
         ("update_property", ("R1", "Value", "10k")),
         ("reload", ()),
+    ]
+
+
+def test_update_properties_can_target_child_sheet() -> None:
+    updates: list[tuple[Path, str, str, str]] = []
+
+    def update_child(path: Path, reference: str, field: str, value: str) -> str:
+        updates.append((path, reference, field, value))
+        return "Updated child."
+
+    service = _service(update_symbol_property_in_file=update_child)
+
+    result = service.update_properties(
+        "D2",
+        "Footprint",
+        "Diode_SMD:Nexperia_CFP3_SOD-123W",
+        sheet_file="power.kicad_sch",
+    )
+
+    assert result == ("Updated child.\nChild schematic updated; reload it in KiCad if open.")
+    assert updates == [
+        (
+            Path("power.kicad_sch"),
+            "D2",
+            "Footprint",
+            "Diode_SMD:Nexperia_CFP3_SOD-123W",
+        )
     ]
 
 

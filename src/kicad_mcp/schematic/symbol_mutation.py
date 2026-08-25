@@ -16,6 +16,7 @@ type SnapNotice = Callable[[tuple[float, ...], tuple[float, ...]], str]
 type FindPlacedSymbolBlock = Callable[[str, str], SymbolMatch | None]
 type ResolveSchematicFile = Callable[[str | None, str | None], Path]
 type ShiftConnectedBundle = Callable[[str, str, float, float], tuple[str, int, int]]
+type UpdateSymbolPropertyInFile = Callable[[Path, str, str, str], str]
 
 
 class TransactionalWrite(Protocol):
@@ -68,9 +69,25 @@ class SchematicSymbolMutationService:
     resolve_schematic_file: ResolveSchematicFile | None = None
     transactional_write_to_file: TransactionalWriteToFile | None = None
     shift_connected_bundle: ShiftConnectedBundle | None = None
+    update_symbol_property_in_file: UpdateSymbolPropertyInFile | None = None
 
-    def update_properties(self, reference: str, field: str, value: str) -> str:
+    def update_properties(
+        self,
+        reference: str,
+        field: str,
+        value: str,
+        sheet: str | None = None,
+        sheet_file: str | None = None,
+    ) -> str:
         """Update one symbol property and reload the schematic."""
+        if sheet or sheet_file:
+            if self.resolve_schematic_file is None or self.update_symbol_property_in_file is None:
+                raise ValueError(
+                    "Child-sheet property updates are not configured for this backend."
+                )
+            target = self.resolve_schematic_file(sheet, sheet_file)
+            result = self.update_symbol_property_in_file(target, reference, field, value)
+            return f"{result}\nChild schematic updated; reload it in KiCad if open."
         result = self.update_symbol_property(reference, field, value)
         return f"{result}\n{self.reload_schematic()}"
 

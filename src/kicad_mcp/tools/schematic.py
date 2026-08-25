@@ -5401,6 +5401,31 @@ def _update_symbol_property_text_fallback(reference: str, field: str, value: str
     return f"Updated {payload.reference}.{payload.field} on {updated_count} instance(s)."
 
 
+def _update_symbol_property_in_file(
+    path: Path,
+    reference: str,
+    field: str,
+    value: str,
+) -> str:
+    """Update placed-symbol properties in one explicitly selected sheet."""
+    updated_count = 0
+
+    def mutator(current: str) -> str:
+        nonlocal updated_count
+        matches = _find_placed_symbol_blocks(current, reference)
+        if not matches:
+            raise ValueError(f"Reference '{reference}' was not found in the schematic.")
+        updated_count = len(matches)
+        updated = current
+        for block, start, end, parsed in reversed(matches):
+            new_block = _update_symbol_property_block(block, parsed, field, value)
+            updated = updated[:start] + new_block + updated[end:]
+        return updated
+
+    _transactional_write_to_schematic_file(path, mutator)
+    return f"Updated {reference}.{field} on {updated_count} instance(s) in {path.name}."
+
+
 def update_symbol_property(reference: str, field: str, value: str) -> str:
     """Update a symbol property through the active backend adapter."""
     return get_schematic_backend().update_symbol_property(reference, field, value)
@@ -6185,6 +6210,7 @@ def _register_authoring(mcp: FastMCP) -> None:
         ),
         transactional_write_to_file=_transactional_write_to_schematic_file,
         shift_connected_bundle=_shift_connected_symbol_bundle,
+        update_symbol_property_in_file=_update_symbol_property_in_file,
     )
     schematic_symbol_mutation.register(
         mcp,
