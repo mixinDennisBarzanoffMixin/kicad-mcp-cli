@@ -110,8 +110,17 @@ kicadq -C ./board plan-rewire --sheet LTE --format json |
 ```
 
 The JSON includes source and symbol-position hashes plus the expected
-name-inclusive connectivity fingerprint. A future writer must re-export the
-netlist and prove that fingerprint unchanged before applying any proposal.
+name-inclusive connectivity fingerprint. `apply-rewire` consumes only
+explicitly selected safe nets, plans again, executes the physical operations in
+a disposable project clone, and promotes exactly one sheet only after the
+connectivity and symbol-position fingerprints, source integrity, and ERC pass.
+
+```bash
+kicadq -C ./board --profile agent_full --mode write apply-rewire \
+  --sheet LTE --net LTE_RT --net LTE_CT \
+  --artifacts output/verified/lte-railways --yes --format json |
+  jq '{status,nets:.selected_nets,promoted:.transaction.promoted}'
+```
 
 ## Atomic schematic edits
 

@@ -21,11 +21,81 @@ from kicad_mcp.deep_inspection import (
 from kicad_mcp.shell_cli import (
     _erc_finding_keys,
     _resolve_edit_schematic,
+    _rewire_tool_calls,
     _schematic_manifest,
     parse_call_arguments,
     result_envelope,
     run_native_board_transaction,
 )
+
+
+def test_rewire_tool_calls_translate_only_physical_operations() -> None:
+    plan = {
+        "sheet": {"file": "folder/power.kicad_sch"},
+        "nets": [
+            {
+                "net": "/Power/SIG",
+                "status": "planned",
+                "selected_operations": [
+                    {
+                        "op": "add_wire",
+                        "start_mm": [10.16, 20.32],
+                        "end_mm": [12.7, 20.32],
+                    },
+                    {"op": "ensure_junction", "at_mm": [12.7, 20.32]},
+                    {"op": "retain_label", "anchor_mm": [10.16, 20.32]},
+                    {
+                        "op": "remove_label",
+                        "net": "/Power/SIG",
+                        "anchor_mm": [15.24, 20.32],
+                    },
+                ],
+            }
+        ],
+    }
+
+    calls, selected = _rewire_tool_calls(plan, ["SIG"])
+
+    assert selected == ["/Power/SIG"]
+    assert calls == [
+        (
+            "sch_add_wire",
+            {
+                "x1_mm": 10.16,
+                "y1_mm": 20.32,
+                "x2_mm": 12.7,
+                "y2_mm": 20.32,
+                "snap_to_grid": False,
+                "sheet_file": "power.kicad_sch",
+            },
+        ),
+        (
+            "sch_delete_label",
+            {
+                "name": "SIG",
+                "x_mm": 15.24,
+                "y_mm": 20.32,
+                "sheet_file": "power.kicad_sch",
+            },
+        ),
+    ]
+
+
+def test_rewire_tool_calls_refuse_ambiguous_local_net_name() -> None:
+    plan = {
+        "sheet": {"file": "power.kicad_sch"},
+        "nets": [
+            {"net": "/A/SIG", "status": "planned", "selected_operations": []},
+            {"net": "/B/SIG", "status": "planned", "selected_operations": []},
+        ],
+    }
+
+    try:
+        _rewire_tool_calls(plan, ["SIG"])
+    except ValueError as exc:
+        assert "ambiguous" in str(exc)
+    else:
+        raise AssertionError("ambiguous local net selector should fail")
 
 
 def test_parse_call_arguments_merges_json_and_set_values() -> None:

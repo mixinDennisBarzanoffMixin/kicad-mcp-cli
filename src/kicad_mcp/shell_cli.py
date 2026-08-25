@@ -351,19 +351,140 @@ def _transaction_artifacts(root: Path, requested: str, tool_name: str) -> Path:
     return root / "build" / "kicadq-transactions" / transaction
 
 
+def _canonical_rewire_net(name: str) -> str:
+    return name.rstrip("/").rsplit("/", 1)[-1]
+
+
+def _rewire_fingerprints(plan: dict[str, Any]) -> dict[str, str]:
+    return {
+        "connectivity": str(plan["connectivity_fingerprint_expectation"]["before"]),
+        "positions": str(plan["position_fingerprint_expectation"]["before"]),
+    }
+
+
+def _rewire_tool_calls(
+    plan: dict[str, Any], requested_nets: Sequence[str]
+) -> tuple[list[tuple[str, dict[str, Any]]], list[str]]:
+    """Translate reviewed railway operations to ordinary schematic tool calls."""
+
+    requested = {name.casefold() for name in requested_nets}
+    for requested_name in requested:
+        matches = {
+            str(item["net"])
+            for item in plan["nets"]
+            if str(item["net"]).casefold() == requested_name
+            or _canonical_rewire_net(str(item["net"])).casefold() == requested_name
+        }
+        if len(matches) > 1:
+            raise ValueError(
+                f"railway net selector {requested_name!r} is ambiguous: "
+                + ", ".join(sorted(matches))
+            )
+    selected = [
+        item
+        for item in plan["nets"]
+        if str(item["net"]).casefold() in requested
+        or _canonical_rewire_net(str(item["net"])).casefold() in requested
+    ]
+    found = {
+        value
+        for item in selected
+        for value in (
+            str(item["net"]).casefold(),
+            _canonical_rewire_net(str(item["net"])).casefold(),
+        )
+    }
+    missing = sorted(name for name in requested if name not in found)
+    if missing:
+        raise ValueError(f"requested railway nets were not found: {', '.join(missing)}")
+    unplanned = [str(item["net"]) for item in selected if item.get("status") != "planned"]
+    if unplanned:
+        raise ValueError("requested railway nets are not safely planned: " + ", ".join(unplanned))
+    sheet_file = Path(str(plan["sheet"]["file"])).name
+    calls: list[tuple[str, dict[str, Any]]] = []
+    selected_names: list[str] = []
+    seen: set[str] = set()
+    for net_plan in selected:
+        selected_names.append(str(net_plan["net"]))
+        for operation in net_plan.get("selected_operations", []):
+            op = str(operation.get("op", ""))
+            call: tuple[str, dict[str, Any]] | None = None
+            if op == "add_wire":
+                start = operation["start_mm"]
+                end = operation["end_mm"]
+                call = (
+                    "sch_add_wire",
+                    {
+                        "x1_mm": start[0],
+                        "y1_mm": start[1],
+                        "x2_mm": end[0],
+                        "y2_mm": end[1],
+                        "snap_to_grid": False,
+                        "sheet_file": sheet_file,
+                    },
+                )
+            elif op == "add_label":
+                anchor = operation["anchor_mm"]
+                call = (
+                    "sch_add_label",
+                    {
+                        "name": operation["name"],
+                        "x_mm": anchor[0],
+                        "y_mm": anchor[1],
+                        "snap_to_grid": False,
+                        "sheet_file": sheet_file,
+                    },
+                )
+            elif op == "remove_label":
+                anchor = operation["anchor_mm"]
+                call = (
+                    "sch_delete_label",
+                    {
+                        "name": _canonical_rewire_net(str(operation["net"])),
+                        "x_mm": anchor[0],
+                        "y_mm": anchor[1],
+                        "sheet_file": sheet_file,
+                    },
+                )
+            elif op not in {"retain_label", "ensure_junction"}:
+                raise ValueError(f"unsupported railway operation: {op}")
+            if call is None:
+                continue
+            key = json.dumps(call, sort_keys=True, separators=(",", ":"))
+            if key not in seen:
+                seen.add(key)
+                calls.append(call)
+    if not calls:
+        raise ValueError("selected railway nets contain no unapplied physical edits")
+    return calls, sorted(set(selected_names))
+
+
 async def run_staged_schematic_edit(args: argparse.Namespace) -> dict[str, Any]:
-    """Apply one schematic tool to a clone and promote it only after verification."""
+    """Apply one or more schematic tools to a clone, then promote atomically."""
     if args.mode not in {"write", "experimental"}:
         raise ValueError("edit requires --mode write or --mode experimental")
     if not args.yes:
         raise ValueError("edit requires --yes after reviewing the tool schema")
-    if not args.tool.startswith("sch_"):
+    tool_calls = getattr(args, "tool_calls", None)
+    if tool_calls is None:
+        tool_calls = [(args.tool, parse_call_arguments(args))]
+    if not tool_calls:
+        raise ValueError("staged edit requires at least one schematic tool call")
+    if not all(tool.startswith("sch_") for tool, _ in tool_calls):
         raise ValueError("staged edit currently accepts only sch_* tools")
+    transaction_label = getattr(args, "transaction_label", None) or args.tool
     root = Path(args.project_dir or ".").expanduser().resolve()
     before_manifest = _schematic_manifest(root)
     if not before_manifest:
         raise ValueError(f"no schematic files found in {root}")
-    artifacts = _transaction_artifacts(root, args.artifacts, args.tool)
+    expected_source_sha = getattr(args, "expected_schematic_sha", None)
+    if expected_source_sha:
+        selected_source = _resolve_edit_schematic(root, args.sheet)
+        if selected_source is None or _hash_file(selected_source) != expected_source_sha:
+            raise RuntimeError(
+                "selected schematic changed after railway planning; re-plan required"
+            )
+    artifacts = _transaction_artifacts(root, args.artifacts, transaction_label)
     before_report = verification_report(
         root,
         sheet=args.sheet,
@@ -371,10 +492,11 @@ async def run_staged_schematic_edit(args: argparse.Namespace) -> dict[str, Any]:
         net=args.net,
         artifacts_dir=artifacts / "before",
     )
-    payload: dict[str, JSONValue]
+    payloads: list[dict[str, JSONValue]] = []
     changed: list[Path]
     diff_text = ""
     after_report: dict[str, Any]
+    staged_rewire_fingerprints: dict[str, str] | None = None
     with tempfile.TemporaryDirectory(prefix="kicadq-edit-") as temporary:
         stage = Path(temporary) / root.name
         shutil.copytree(
@@ -397,22 +519,25 @@ async def run_staged_schematic_edit(args: argparse.Namespace) -> dict[str, Any]:
         if target_schematic is not None:
             os.environ["KICAD_MCP_SCH_FILE"] = str(target_schematic)
         try:
-            payload = await invoke_backend_tool(stage_args, args.tool, parse_call_arguments(args))
+            for tool_name, tool_arguments in tool_calls:
+                payload = await invoke_backend_tool(stage_args, tool_name, tool_arguments)
+                payloads.append(payload)
+                if not payload["ok"]:
+                    return {
+                        "schema_version": "1.0",
+                        "status": "rejected",
+                        "promoted": False,
+                        "reason": "backend rejected a staged edit",
+                        "tool": transaction_label,
+                        "failed_tool": tool_name,
+                        "tool_results": payloads,
+                        "artifacts": str(artifacts),
+                    }
         finally:
             if previous_schematic is None:
                 os.environ.pop("KICAD_MCP_SCH_FILE", None)
             else:
                 os.environ["KICAD_MCP_SCH_FILE"] = previous_schematic
-        if not payload["ok"]:
-            return {
-                "schema_version": "1.0",
-                "status": "rejected",
-                "promoted": False,
-                "reason": "backend rejected the staged edit",
-                "tool": args.tool,
-                "tool_result": payload,
-                "artifacts": str(artifacts),
-            }
         stage_manifest = _schematic_manifest(stage)
         if set(stage_manifest) != set(before_manifest):
             added = sorted(str(item) for item in set(stage_manifest) - set(before_manifest))
@@ -458,6 +583,28 @@ async def run_staged_schematic_edit(args: argparse.Namespace) -> dict[str, Any]:
             net=args.net,
             artifacts_dir=artifacts / "after",
         )
+        expected_rewire_fingerprints = getattr(args, "expected_rewire_fingerprints", None)
+        if expected_rewire_fingerprints:
+            staged_rewire_plan = plan_railway_rewire(
+                stage,
+                project_snapshot(stage),
+                sheet=args.sheet,
+                cluster_refs=getattr(args, "rewire_references", None) or None,
+            )
+            staged_rewire_fingerprints = _rewire_fingerprints(staged_rewire_plan)
+            if staged_rewire_fingerprints != expected_rewire_fingerprints:
+                return {
+                    "schema_version": "1.0",
+                    "status": "rejected",
+                    "promoted": False,
+                    "reason": "staged railway edit changed connectivity or symbol positions",
+                    "tool": transaction_label,
+                    "expected_fingerprints": expected_rewire_fingerprints,
+                    "staged_fingerprints": staged_rewire_fingerprints,
+                    "tool_results": payloads,
+                    "artifacts": str(artifacts),
+                    "diff": str(diff_path),
+                }
         source_ok = after_report["checks"]["source_integrity"]["status"] == "pass"
         connectivity_ok = after_report["checks"]["connectivity"]["status"] != "fail"
         new_erc_errors = sorted(_erc_finding_keys(after_report) - _erc_finding_keys(before_report))
@@ -469,8 +616,9 @@ async def run_staged_schematic_edit(args: argparse.Namespace) -> dict[str, Any]:
                 "reason": (
                     "staged verification found corruption, connectivity failure, or new ERC errors"
                 ),
-                "tool": args.tool,
-                "tool_result": payload,
+                "tool": transaction_label,
+                "tool_result": payloads[0] if len(payloads) == 1 else payloads,
+                "tool_results": payloads,
                 "changed_files": [str(relative)],
                 "new_erc_errors": [json.loads(item) for item in new_erc_errors],
                 "before": before_report,
@@ -495,6 +643,17 @@ async def run_staged_schematic_edit(args: argparse.Namespace) -> dict[str, Any]:
                 raise RuntimeError("promoted project does not reproduce staged ERC evidence")
             if final_report["checks"]["connectivity"]["status"] == "fail":
                 raise RuntimeError("promoted project failed the final connectivity filter gate")
+            if expected_rewire_fingerprints:
+                final_rewire_plan = plan_railway_rewire(
+                    root,
+                    project_snapshot(root),
+                    sheet=args.sheet,
+                    cluster_refs=getattr(args, "rewire_references", None) or None,
+                )
+                if _rewire_fingerprints(final_rewire_plan) != expected_rewire_fingerprints:
+                    raise RuntimeError(
+                        "promoted project does not preserve railway connectivity/positions"
+                    )
         except Exception:
             (root / relative).write_bytes(backup)
             if promotion.exists():
@@ -505,14 +664,16 @@ async def run_staged_schematic_edit(args: argparse.Namespace) -> dict[str, Any]:
         "schema_version": "1.0",
         "status": "pass" if after_report["status"] == "pass" else "review",
         "promoted": True,
-        "tool": args.tool,
-        "tool_result": payload,
+        "tool": transaction_label,
+        "tool_result": payloads[0] if len(payloads) == 1 else payloads,
+        "tool_results": payloads,
         "changed_files": [str(item) for item in changed],
         "before": before_report,
         "after": after_report,
         "artifacts": str(artifacts),
         "diff": str(artifacts / "edit.diff"),
         "diff_lines": len(diff_text.splitlines()),
+        "rewire_fingerprints": staged_rewire_fingerprints,
     }
 
 
@@ -873,6 +1034,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     plan_rewire.add_argument("--format", choices=("json", "text"), default="text")
 
+    apply_rewire = subcommands.add_parser(
+        "apply-rewire",
+        help="atomically apply selected exact-pin railway nets after staged verification",
+    )
+    apply_rewire.add_argument("--sheet", required=True)
+    apply_rewire.add_argument(
+        "--ref",
+        dest="references",
+        action="append",
+        default=[],
+        help="limit planning to one cluster reference; repeatable",
+    )
+    apply_rewire.add_argument(
+        "--net",
+        dest="rewire_nets",
+        action="append",
+        required=True,
+        help="apply one safely planned net; repeatable (full or local net name)",
+    )
+    apply_rewire.add_argument("--artifacts", default="")
+    apply_rewire.add_argument("--yes", action="store_true")
+    apply_rewire.add_argument("--format", choices=("json", "text"), default="text")
+
     plan_schematic = subcommands.add_parser(
         "plan-schematic",
         help="dry-run graph-ranked schematic symbol placement and railway wiring",
@@ -1144,6 +1328,46 @@ def main(argv: Sequence[str] | None = None) -> None:
                 print(json.dumps(report, indent=2, sort_keys=True))
             else:
                 print(format_railway_rewire_plan(report))
+            return
+        if args.command == "apply-rewire":
+            project_root = Path(args.project_dir or ".").expanduser().resolve()
+            plan = plan_railway_rewire(
+                project_root,
+                project_snapshot(project_root),
+                sheet=args.sheet,
+                cluster_refs=args.references or None,
+            )
+            calls, selected_nets = _rewire_tool_calls(plan, args.rewire_nets)
+            args.tool = "apply-rewire"
+            args.transaction_label = "railway-rewire"
+            args.tool_calls = calls
+            args.expected_schematic_sha = plan["source"]["sha256_before"]
+            args.expected_rewire_fingerprints = _rewire_fingerprints(plan)
+            args.rewire_references = args.references
+            args.reference = ""
+            args.net = ""
+            transaction = asyncio.run(run_staged_schematic_edit(args))
+            report = {
+                "schema_version": "1.0",
+                "status": transaction["status"],
+                "selected_nets": selected_nets,
+                "planned_source": plan["source"],
+                "physical_tool_calls": [
+                    {"tool": tool, "arguments": arguments} for tool, arguments in calls
+                ],
+                "transaction": transaction,
+            }
+            if args.format == "json":
+                print(json.dumps(report, indent=2, sort_keys=True))
+            else:
+                print(
+                    f"RAILWAY APPLY status={report['status']} "
+                    f"promoted={str(transaction.get('promoted', False)).lower()}"
+                )
+                print("nets=" + ",".join(selected_nets))
+                print(f"physical_tool_calls={len(calls)} artifacts={transaction['artifacts']}")
+            if transaction["status"] == "rejected":
+                raise SystemExit(3)
             return
         if args.command == "plan-schematic":
             report = plan_schematic_graph_placement(
