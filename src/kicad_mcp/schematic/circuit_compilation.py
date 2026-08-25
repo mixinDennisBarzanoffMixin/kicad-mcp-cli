@@ -169,11 +169,17 @@ class SchematicCircuitCompilationService:
         snap_to_grid: bool = True,
         auto_layout: bool = False,
         unsafe_routed_wires: bool = False,
+        paper: str | None = None,
         max_paper: str = "A3",
     ) -> str:
         """Build and replace the active schematic from structured circuit inputs."""
         schematic_file = self.active_schematic_file()
-        start_paper = self.read_sheet_paper(schematic_file)
+        current_paper = self.read_sheet_paper(schematic_file)
+        if paper is not None and paper not in self.paper_sizes:
+            raise ValueError(
+                f"Invalid paper {paper!r}. Expected one of {', '.join(self.paper_sizes)}."
+            )
+        start_paper = paper or current_paper
         prepared = self.prepare_inputs(
             symbols=symbols,
             wires=wires,
@@ -217,11 +223,7 @@ class SchematicCircuitCompilationService:
         removed_symbols, removed_labels, backup_path = self.snapshot_before_replace(schematic_file)
 
         paper_declaration = self.read_sheet_paper_declaration(schematic_file)
-        if (
-            auto_layout
-            and prepared.chosen_paper != start_paper
-            and prepared.chosen_paper in self.paper_sizes
-        ):
+        if prepared.chosen_paper != current_paper and prepared.chosen_paper in self.paper_sizes:
             paper_declaration = f'(paper "{prepared.chosen_paper}")'
         root_uuid = self.new_uuid()
         project_name = self.project_name()

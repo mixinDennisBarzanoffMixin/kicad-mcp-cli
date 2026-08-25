@@ -58,6 +58,7 @@ class FakeCircuitCompilationService:
         snap_to_grid: bool = True,
         auto_layout: bool = False,
         unsafe_routed_wires: bool = False,
+        paper: str | None = None,
         max_paper: str = "A3",
     ) -> str:
         self.calls.append(
@@ -73,6 +74,7 @@ class FakeCircuitCompilationService:
                     "snap_to_grid": snap_to_grid,
                     "auto_layout": auto_layout,
                     "unsafe_routed_wires": unsafe_routed_wires,
+                    "paper": paper,
                     "max_paper": max_paper,
                 },
             )
@@ -148,6 +150,8 @@ def test_registration_preserves_names_descriptions_and_schemas() -> None:
         'a larger cap (e.g. ``max_paper="A0"``) for the historical largest-paper\n'
         "behavior. ``max_paper`` must be one of A4/A3/A2/A1/A0; any other value\n"
         "raises ``ValueError``.\n\n"
+        "Set ``paper`` to A4/A3/A2/A1/A0 when explicit coordinates target a\n"
+        "specific sheet size. If omitted, the current sheet size is preserved.\n\n"
         "Recommended workflow:\n"
         "  1. Call ``sch_find_free_placement(count=N)`` to obtain safe coordinates.\n"
         "  2. Pass those coordinates in the ``symbols`` list.\n"
@@ -171,7 +175,9 @@ def test_registration_preserves_names_descriptions_and_schemas() -> None:
         if name == "sch_build_circuit":
             # sch_build_circuit exposes the paper-growth cap; analyze does not.
             expected.add("max_paper")
+            expected.add("paper")
             assert properties["max_paper"]["default"] == "A3"
+            assert properties["paper"]["default"] is None
         assert set(properties) == expected
         assert properties["symbols"]["default"] is None
         assert properties["snap_to_grid"]["default"] is True
@@ -207,5 +213,5 @@ def test_registration_delegates_exact_arguments() -> None:
     assert tools["sch_analyze_net_compilation"].fn(**kwargs) == "analysis"
     assert tools["sch_build_circuit"].fn(**kwargs) == "built"
     # build forwards the extra max_paper cap at its default when unspecified.
-    build_kwargs = {**kwargs, "max_paper": "A3"}
+    build_kwargs = {**kwargs, "paper": None, "max_paper": "A3"}
     assert service.calls == [("analyze", kwargs), ("build", build_kwargs)]

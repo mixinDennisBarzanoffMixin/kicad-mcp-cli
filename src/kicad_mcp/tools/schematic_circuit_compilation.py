@@ -67,6 +67,7 @@ def register(
         snap_to_grid: bool = True,
         auto_layout: bool = False,
         unsafe_routed_wires: bool = False,
+        paper: str | None = None,
         max_paper: str = "A3",
     ) -> str:
         """Build (overwrite) the active schematic from structured symbol, wire, and label inputs.
@@ -128,6 +129,9 @@ def register(
         behavior. ``max_paper`` must be one of A4/A3/A2/A1/A0; any other value
         raises ``ValueError``.
 
+        Set ``paper`` to A4/A3/A2/A1/A0 when explicit coordinates target a
+        specific sheet size. If omitted, the current sheet size is preserved.
+
         Recommended workflow:
           1. Call ``sch_find_free_placement(count=N)`` to obtain safe coordinates.
           2. Pass those coordinates in the ``symbols`` list.
@@ -143,5 +147,6 @@ def register(
             snap_to_grid=snap_to_grid,
             auto_layout=auto_layout,
             unsafe_routed_wires=unsafe_routed_wires,
+            paper=paper,
             max_paper=max_paper,
         )

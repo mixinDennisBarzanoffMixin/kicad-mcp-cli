@@ -60,7 +60,7 @@ class CompilationHarness:
             read_sheet_paper_declaration=lambda path: self.paper_declaration,
             prepare_inputs=self.prepare_inputs,
             render_report=self.render_report,
-            paper_sizes={"A4": object(), "A3": object()},
+            paper_sizes={"A4": object(), "A3": object(), "A2": object()},
             new_uuid=lambda: "root-uuid",
             load_lib_symbol=self.load_lib_symbol,
             snap_point=lambda x, y, enabled: (x, y),
@@ -112,6 +112,7 @@ class CompilationHarness:
             }
         )
         return self.prepared
+
 
     def render_report(
         self,
@@ -372,6 +373,41 @@ def test_build_promotes_named_paper_when_auto_layout_grows(tmp_path: Path) -> No
         "wrote 0 symbol(s) and 0 label(s).\n"
         "Applied auto-layout to schematic symbols."
     )
+
+
+def test_build_applies_explicit_paper_for_coordinate_driven_layout(tmp_path: Path) -> None:
+    harness = CompilationHarness(tmp_path)
+    harness.prepared = PreparedCircuitInputs(
+        symbols=[],
+        powers=[],
+        labels=[],
+        wires=[],
+        nets=[],
+        generated_wires=[],
+        unresolved_nets=[],
+        resolution_stats={
+            "resolved_endpoints": 0,
+            "unresolved_endpoints": 0,
+            "pin_alias_resolutions": 0,
+            "symbol_center_resolutions": 0,
+        },
+        chosen_paper="A2",
+    )
+
+    harness.service().build(paper="A2")
+
+    assert harness.prepare_calls[0]["paper"] == "A2"
+    assert '\t(paper "A2")' in harness.transaction_calls[0][2]
+
+
+def test_build_rejects_invalid_explicit_paper_before_snapshot(tmp_path: Path) -> None:
+    harness = CompilationHarness(tmp_path)
+
+    with pytest.raises(ValueError, match="Invalid paper 'Poster'"):
+        harness.service().build(paper="Poster")
+
+    assert harness.snapshot_calls == []
+    assert harness.transaction_calls == []
 
 
 def test_build_deduplicates_libraries_and_generates_all_element_types(tmp_path: Path) -> None:
