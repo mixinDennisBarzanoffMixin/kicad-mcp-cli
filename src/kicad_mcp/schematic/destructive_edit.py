@@ -143,7 +143,7 @@ class SchematicDestructiveEditService:
             pieces.append(current_text[last:])
             if not removed:
                 raise ValueError(f"Wire '{wire_id}' could not be removed.")
-            return "".join(pieces)
+            return re.sub(r"(?m)^[ \t]+$", "", "".join(pieces))
 
         try:
             if targeted_child and self.transactional_write_to_file is not None:
@@ -225,7 +225,7 @@ class SchematicDestructiveEditService:
                             continue
                 cursor += 1
             pieces.append(current[last:])
-            return "".join(pieces)
+            return re.sub(r"(?m)^[ \t]+$", "", "".join(pieces))
 
         try:
             if targeted_child and self.transactional_write_to_file is not None:
@@ -299,7 +299,7 @@ class SchematicDestructiveEditService:
                     f"No label '{name}' found near "
                     f"({self.format_mm(x_mm)}, {self.format_mm(y_mm)})."
                 )
-            return "".join(pieces)
+            return re.sub(r"(?m)^[ \t]+$", "", "".join(pieces))
 
         try:
             if targeted_child and self.transactional_write_to_file is not None:
@@ -358,7 +358,7 @@ class SchematicDestructiveEditService:
                     f"No no-connect marker found near "
                     f"({self.format_mm(x_mm)}, {self.format_mm(y_mm)})."
                 )
-            return "".join(pieces)
+            return re.sub(r"(?m)^[ \t]+$", "", "".join(pieces))
 
         try:
             self.transactional_write(mutator, allow_node_loss=True)
@@ -426,7 +426,7 @@ class SchematicDestructiveEditService:
                     f"No label '{name}' found near "
                     f"({self.format_mm(x_mm)}, {self.format_mm(y_mm)})."
                 )
-            return "".join(pieces)
+            return re.sub(r"(?m)^[ \t]+$", "", "".join(pieces))
 
         try:
             self.transactional_write(mutator)
@@ -483,7 +483,7 @@ class SchematicDestructiveEditService:
                     f"No label '{name}' found near "
                     f"({self.format_mm(x_mm)}, {self.format_mm(y_mm)})."
                 )
-            return "".join(pieces)
+            return re.sub(r"(?m)^[ \t]+$", "", "".join(pieces))
 
         try:
             self.transactional_write(mutator)
