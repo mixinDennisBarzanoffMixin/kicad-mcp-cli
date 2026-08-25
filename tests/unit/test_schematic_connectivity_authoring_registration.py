@@ -113,6 +113,10 @@ def test_registration_preserves_names_descriptions_and_schemas() -> None:
         "requested direction. Positive fanout is clockwise from that direction\n"
         "(right -> down, down -> left, left -> up, up -> right), so jq can assign\n"
         "signed lanes deterministically.\n\n"
+        "Every proposed segment is checked against existing schematic wires and\n"
+        "same-batch stubs for other nets. A crossing or overlap is refused before\n"
+        "the file is written, preventing a visually separated terminal from\n"
+        "silently shorting through its dogleg geometry.\n\n"
         "``label_kind`` selects the emitted label type for non-power nets:\n"
         '``"local"``, ``"global"``, or ``"hierarchical"``. When set it takes\n'
         "precedence over the legacy ``global_labels`` boolean, enabling batch\n"

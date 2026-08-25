@@ -1204,10 +1204,10 @@ async def test_schematic_add_pin_labels_uses_symbol_edges_for_tall_side_pins(
 
 
 @pytest.mark.anyio
-async def test_schematic_add_pin_labels_staggers_neighbouring_terminals(
+async def test_schematic_add_pin_labels_refuses_neighbouring_net_overlap(
     sample_project, mock_kicad
 ) -> None:
-    """Neighbouring pin-label terminals should not land at the same coordinate."""
+    """Neighbouring terminals must not be separated by overlapping net stubs."""
     server = build_server("schematic")
     await call_tool_text(
         server,
@@ -1246,10 +1246,10 @@ async def test_schematic_add_pin_labels_staggers_neighbouring_terminals(
         },
     )
 
-    assert "staggered" in result
+    assert "REFUSE R2.1 -> SIG_B: proposed stub intersects net 'SIG_A'" in result
     schematic = (sample_project / "demo.kicad_sch").read_text(encoding="utf-8")
     assert '(global_label "SIG_A"' in schematic
-    assert '(global_label "SIG_B"' in schematic
+    assert '(global_label "SIG_B"' not in schematic
 
 
 @pytest.mark.anyio

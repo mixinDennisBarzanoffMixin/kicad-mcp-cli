@@ -270,6 +270,40 @@ def test_add_pin_labels_emits_orthogonal_fanout_lane(tmp_path: Path) -> None:
     assert "U1.1 -> SIG @ (17.08, 14.92); fanout -5.08 mm after 2.54 mm" in result
 
 
+def test_add_pin_labels_refuses_fanout_crossing_another_net(tmp_path: Path) -> None:
+    harness = _harness(
+        tmp_path,
+        parsed={"uuid": "root", "symbols": [_symbol()], "power_symbols": []},
+        pin_positions={
+            ("Device", "R"): {
+                "5": (118.11, 74.93),
+                "7": (118.11, 80.01),
+            }
+        },
+        power_net=lambda name: False,
+    )
+
+    result = harness.service.add_pin_labels(
+        [
+            {"reference": "U1", "pin": "5", "net": "FB", "direction": "right"},
+            {
+                "reference": "U1",
+                "pin": "7",
+                "net": "+3V3",
+                "direction": "right",
+                "fanout_mm": -5.08,
+                "bend_mm": 2.54,
+            },
+        ],
+        stub_mm=10.16,
+        global_labels=False,
+    )
+
+    assert sum(name == "wire_block" for name, _ in harness.calls) == 1
+    assert sum(name == "label_block" for name, _ in harness.calls) == 1
+    assert "REFUSE U1.7 -> +3V3: proposed stub intersects net 'FB'" in result
+
+
 @pytest.mark.parametrize("field,value", [("fanout_mm", "sideways"), ("bend_mm", -1)])
 def test_add_pin_labels_rejects_invalid_fanout_geometry(
     tmp_path: Path, field: str, value: object
@@ -506,9 +540,9 @@ def test_add_pin_labels_merges_stacked_signal_pins_into_one_label(tmp_path: Path
     assert "staggered" not in result
 
 
-def test_add_pin_labels_still_staggers_distinct_colliding_coordinates(tmp_path: Path) -> None:
-    # Genuinely distinct pin coordinates whose terminal endpoints collide must
-    # still be staggered apart -- unchanged behavior.
+def test_add_pin_labels_refuses_overlapping_collinear_stubs(tmp_path: Path) -> None:
+    # Extending a second collinear stub farther than the first would overlap two
+    # different nets. Terminal staggering alone cannot make that geometry safe.
     harness = _harness(
         tmp_path,
         parsed={"uuid": "root", "symbols": [_symbol()], "power_symbols": []},
@@ -523,10 +557,10 @@ def test_add_pin_labels_still_staggers_distinct_colliding_coordinates(tmp_path: 
         ]
     )
 
-    assert sum(name == "wire_block" for name, _ in harness.calls) == 2
-    assert sum(name == "label_block" for name, _ in harness.calls) == 2
+    assert sum(name == "wire_block" for name, _ in harness.calls) == 1
+    assert sum(name == "label_block" for name, _ in harness.calls) == 1
     assert "U1.1 -> A @ (17.08, 20.0)" in result
-    assert "U1.2 -> B @ (23.16, 20.0); staggered 2 step(s)" in result
+    assert "REFUSE U1.2 -> B: proposed stub intersects net 'A'" in result
     assert "stacked on shared terminal" not in result
 
 

@@ -56,6 +56,11 @@ def register(mcp: FastMCP, dependencies: SchematicConnectivityAuthoringDependenc
         (right -> down, down -> left, left -> up, up -> right), so jq can assign
         signed lanes deterministically.
 
+        Every proposed segment is checked against existing schematic wires and
+        same-batch stubs for other nets. A crossing or overlap is refused before
+        the file is written, preventing a visually separated terminal from
+        silently shorting through its dogleg geometry.
+
         ``label_kind`` selects the emitted label type for non-power nets:
         ``"local"``, ``"global"``, or ``"hierarchical"``. When set it takes
         precedence over the legacy ``global_labels`` boolean, enabling batch

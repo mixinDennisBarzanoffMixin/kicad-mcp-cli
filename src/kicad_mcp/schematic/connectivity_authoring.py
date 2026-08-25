@@ -71,6 +71,43 @@ PIN_STUB_DIRECTIONS: dict[str, tuple[float, float]] = {
 }
 
 
+def _segments_intersect(first: WireSegment, second: WireSegment) -> bool:
+    """Return whether two line segments touch or cross, with a small CAD tolerance."""
+
+    tolerance = 1e-6
+
+    def orientation(
+        ax: float, ay: float, bx: float, by: float, cx: float, cy: float
+    ) -> float:
+        return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+
+    def on_segment(
+        ax: float, ay: float, bx: float, by: float, cx: float, cy: float
+    ) -> bool:
+        return (
+            min(ax, bx) - tolerance <= cx <= max(ax, bx) + tolerance
+            and min(ay, by) - tolerance <= cy <= max(ay, by) + tolerance
+            and abs(orientation(ax, ay, bx, by, cx, cy)) <= tolerance
+        )
+
+    ax, ay, bx, by = first
+    cx, cy, dx, dy = second
+    o1 = orientation(ax, ay, bx, by, cx, cy)
+    o2 = orientation(ax, ay, bx, by, dx, dy)
+    o3 = orientation(cx, cy, dx, dy, ax, ay)
+    o4 = orientation(cx, cy, dx, dy, bx, by)
+    if ((o1 > tolerance and o2 < -tolerance) or (o1 < -tolerance and o2 > tolerance)) and (
+        (o3 > tolerance and o4 < -tolerance) or (o3 < -tolerance and o4 > tolerance)
+    ):
+        return True
+    return (
+        (abs(o1) <= tolerance and on_segment(ax, ay, bx, by, cx, cy))
+        or (abs(o2) <= tolerance and on_segment(ax, ay, bx, by, dx, dy))
+        or (abs(o3) <= tolerance and on_segment(cx, cy, dx, dy, ax, ay))
+        or (abs(o4) <= tolerance and on_segment(cx, cy, dx, dy, bx, by))
+    )
+
+
 @dataclass(frozen=True)
 class SchematicConnectivityAuthoringService:
     """Author and repair schematic connectivity without depending on FastMCP."""
@@ -159,6 +196,16 @@ class SchematicConnectivityAuthoringService:
         project_name = self.project_name()
         root_uuid = str(data.get("uuid") or self.new_uuid())
         wire_blocks: list[str] = []
+        existing_wire_segments: list[WireSegment] = [
+            (
+                float(wire["x1"]),
+                float(wire["y1"]),
+                float(wire["x2"]),
+                float(wire["y2"]),
+            )
+            for wire in data.get("wires", [])
+        ]
+        planned_wire_segments: list[tuple[WireSegment, str]] = []
         terminal_blocks: list[str] = []
         power_lib_defs: dict[str, str] = {}
         occupied_terminals: list[tuple[float, float]] = []
@@ -361,8 +408,7 @@ class SchematicConnectivityAuthoringService:
                 ex = round(px + ux * length + vx * fanout_mm, 4)
                 ey = round(py + uy * length + vy * fanout_mm, 4)
                 stagger_steps += 1
-            occupied_terminals.append((ex, ey))
-            wire_count_before = len(wire_blocks)
+            candidate_segments: list[WireSegment] = []
             if fanout_mm:
                 bend_x = round(px + ux * bend_mm, 4)
                 bend_y = round(py + uy * bend_mm, 4)
@@ -373,9 +419,47 @@ class SchematicConnectivityAuthoringService:
                     route_points, route_points[1:], strict=False
                 ):
                     if (x1, y1) != (x2, y2):
-                        wire_blocks.append(self.wire_block(x1, y1, x2, y2))
+                        candidate_segments.append((x1, y1, x2, y2))
             else:
-                wire_blocks.append(self.wire_block(px, py, ex, ey))
+                candidate_segments.append((px, py, ex, ey))
+            conflict: tuple[WireSegment, str | None] | None = None
+            for candidate in candidate_segments:
+                existing_conflict = next(
+                    (
+                        segment
+                        for segment in existing_wire_segments
+                        if _segments_intersect(candidate, segment)
+                    ),
+                    None,
+                )
+                if existing_conflict is not None:
+                    conflict = (existing_conflict, None)
+                    break
+                planned_conflict = next(
+                    (
+                        (segment, segment_net)
+                        for segment, segment_net in planned_wire_segments
+                        if segment_net != net and _segments_intersect(candidate, segment)
+                    ),
+                    None,
+                )
+                if planned_conflict is not None:
+                    conflict = planned_conflict
+                    break
+            if conflict is not None:
+                segment, segment_net = conflict
+                owner = "an existing wire" if segment_net is None else f"net {segment_net!r}"
+                results.append(
+                    f"REFUSE {ref}.{pin} -> {net}: proposed stub intersects {owner} "
+                    f"segment {segment}"
+                )
+                continue
+            occupied_terminals.append((ex, ey))
+            wire_count_before = len(wire_blocks)
+            planned_count_before = len(planned_wire_segments)
+            for x1, y1, x2, y2 in candidate_segments:
+                wire_blocks.append(self.wire_block(x1, y1, x2, y2))
+                planned_wire_segments.append(((x1, y1, x2, y2), net))
             suffix = f"; staggered {stagger_steps} step(s)" if stagger_steps else ""
             if fanout_mm:
                 suffix += f"; fanout {fanout_mm:g} mm after {bend_mm:g} mm"
@@ -386,6 +470,7 @@ class SchematicConnectivityAuthoringService:
                     if lib_def is None:
                         results.append(f"{ref}.{pin}: power symbol '{net}' was not found")
                         del wire_blocks[wire_count_before:]
+                        del planned_wire_segments[planned_count_before:]
                         occupied_terminals.pop()
                         continue
                     power_lib_defs[net] = lib_def
