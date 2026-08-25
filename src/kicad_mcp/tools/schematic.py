@@ -4081,7 +4081,11 @@ def _plan_netlist_pin_terminals(
                 }
             )
             rotation = _terminal_rotation_from_vector(ux, uy)
-            if _should_place_power_terminal_symbol(net_name):
+            # An explicit scope is authoritative.  In particular, a global
+            # power rail on a child sheet must remain a global label: emitting
+            # a local power symbol/PWR_FLAG can create a second power-output
+            # driver when the rail is already driven on another sheet.
+            if label_kind is None and _should_place_power_terminal_symbol(net_name):
                 terminal_powers.append(
                     {"name": net_name, "x_mm": ex, "y_mm": ey, "rotation": 0, "snap_to_grid": False}
                 )
@@ -4122,7 +4126,8 @@ def _plan_netlist_pin_terminals(
     flag_nets = sorted(
         net_name
         for net_name in net_names_seen
-        if (net_needs_driver.get(net_name) or _should_place_power_terminal_symbol(net_name))
+        if net_label_kinds.get(net_name) is None
+        and (net_needs_driver.get(net_name) or _should_place_power_terminal_symbol(net_name))
         and not net_has_power_out.get(net_name)
     )
     flag_x = AUTO_LAYOUT_ORIGIN_X_MM

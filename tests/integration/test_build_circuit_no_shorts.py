@@ -135,6 +135,33 @@ async def test_build_circuit_defaults_to_global_label_without_scope(
 
 
 @pytest.mark.anyio
+async def test_explicit_global_power_scope_uses_labels_without_local_power_driver(
+    sample_project, mock_kicad
+) -> None:
+    """Cross-sheet power rails stay labels and rely on project-wide ERC for a driver."""
+    server = build_server("schematic")
+    await call_tool_text(
+        server,
+        "sch_build_circuit",
+        {
+            "symbols": _SHARED_RAIL_SYMBOLS,
+            "nets": [
+                {
+                    "name": "GND",
+                    "endpoints": ["R1.1", "R2.1", "R3.1"],
+                    "scope": "global",
+                }
+            ],
+        },
+    )
+
+    schematic = (sample_project / "demo.kicad_sch").read_text(encoding="utf-8")
+    assert schematic.count('(global_label "GND"') == 3
+    assert '(lib_id "power:GND")' not in schematic
+    assert "PWR_FLAG" not in schematic
+
+
+@pytest.mark.anyio
 async def test_build_circuit_rejects_invalid_scope(sample_project, mock_kicad) -> None:
     server = build_server("schematic")
     result = await call_tool_text(

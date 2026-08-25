@@ -307,6 +307,30 @@ def _schematic_manifest(root: Path) -> dict[Path, str]:
     }
 
 
+def _resolve_edit_schematic(root: Path, sheet: str) -> Path | None:
+    """Resolve a human sheet filter to one concrete child schematic file."""
+    query = sheet.strip().strip("/").casefold()
+    if not query:
+        return None
+    candidates = [root / relative for relative in _schematic_manifest(root)]
+    exact = [
+        path
+        for path in candidates
+        if query in {path.name.casefold(), path.stem.casefold()}
+    ]
+    matches = exact or [
+        path
+        for path in candidates
+        if query in path.name.casefold() or query in str(path.relative_to(root)).casefold()
+    ]
+    if not matches:
+        raise ValueError(f"sheet filter matched no schematic file: {sheet}")
+    if len(matches) != 1:
+        relative = [str(path.relative_to(root)) for path in matches]
+        raise ValueError(f"sheet filter is ambiguous: {sheet} -> {relative}")
+    return matches[0]
+
+
 def _erc_finding_keys(report: dict[str, Any]) -> set[str]:
     findings = report["checks"]["erc"]["findings"]
     return {
@@ -364,7 +388,17 @@ async def run_staged_schematic_edit(args: argparse.Namespace) -> dict[str, Any]:
         )
         stage_args = argparse.Namespace(**vars(args))
         stage_args.project_dir = str(stage)
-        payload = await invoke_backend_tool(stage_args, args.tool, parse_call_arguments(args))
+        target_schematic = _resolve_edit_schematic(stage, args.sheet)
+        previous_schematic = os.environ.get("KICAD_MCP_SCH_FILE")
+        if target_schematic is not None:
+            os.environ["KICAD_MCP_SCH_FILE"] = str(target_schematic)
+        try:
+            payload = await invoke_backend_tool(stage_args, args.tool, parse_call_arguments(args))
+        finally:
+            if previous_schematic is None:
+                os.environ.pop("KICAD_MCP_SCH_FILE", None)
+            else:
+                os.environ["KICAD_MCP_SCH_FILE"] = previous_schematic
         if not payload["ok"]:
             return {
                 "schema_version": "1.0",
@@ -392,6 +426,13 @@ async def run_staged_schematic_edit(args: argparse.Namespace) -> dict[str, Any]:
             raise RuntimeError(
                 f"staged edit must change exactly one schematic file; changed {len(changed)}"
             )
+        if target_schematic is not None:
+            expected = target_schematic.relative_to(stage)
+            if changed != [expected]:
+                raise RuntimeError(
+                    "staged edit changed a schematic other than the selected sheet: "
+                    f"expected {expected}, changed {changed}"
+                )
         relative = changed[0]
         original_text = (root / relative).read_text(encoding="utf-8")
         staged_text = (stage / relative).read_text(encoding="utf-8")

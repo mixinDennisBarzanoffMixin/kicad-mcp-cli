@@ -20,6 +20,7 @@ from kicad_mcp.deep_inspection import (
 )
 from kicad_mcp.shell_cli import (
     _erc_finding_keys,
+    _resolve_edit_schematic,
     _schematic_manifest,
     parse_call_arguments,
     result_envelope,
@@ -49,6 +50,27 @@ def test_schematic_manifest_ignores_generated_history(tmp_path: Path) -> None:
     (history / "power.kicad_sch").write_text("backup", encoding="utf-8")
 
     assert list(_schematic_manifest(tmp_path)) == [Path("power.kicad_sch")]
+
+
+def test_resolve_edit_schematic_targets_one_child_sheet(tmp_path: Path) -> None:
+    (tmp_path / "demo.kicad_sch").write_text("top", encoding="utf-8")
+    child = tmp_path / "03_LTE_3V8_Power.kicad_sch"
+    child.write_text("child", encoding="utf-8")
+
+    assert _resolve_edit_schematic(tmp_path, "LTE_3V8_Power") == child
+    assert _resolve_edit_schematic(tmp_path, "") is None
+
+
+def test_resolve_edit_schematic_rejects_ambiguous_filter(tmp_path: Path) -> None:
+    (tmp_path / "Power_A.kicad_sch").write_text("a", encoding="utf-8")
+    (tmp_path / "Power_B.kicad_sch").write_text("b", encoding="utf-8")
+
+    try:
+        _resolve_edit_schematic(tmp_path, "Power")
+    except ValueError as exc:
+        assert "ambiguous" in str(exc)
+    else:
+        raise AssertionError("ambiguous sheet filter should fail")
 
 
 def test_erc_finding_keys_only_tracks_errors() -> None:

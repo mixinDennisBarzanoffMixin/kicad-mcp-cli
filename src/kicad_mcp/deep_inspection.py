@@ -86,6 +86,7 @@ def _export_netlist(schematic: Path) -> ET.Element:
             check=False,
             capture_output=True,
             text=True,
+            cwd=schematic.parent,
         )
         if process.returncode != 0 or not output.is_file():
             diagnostic = process.stderr.strip() or process.stdout.strip()
@@ -620,6 +621,7 @@ def _erc_evidence(schematic: Path, *, sheet: str = "") -> JsonRecord:
             check=False,
             capture_output=True,
             text=True,
+            cwd=schematic.parent,
         )
         if process.returncode != 0 or not output.is_file():
             diagnostic = process.stderr.strip() or process.stdout.strip()
@@ -766,33 +768,47 @@ def _render_verification_svgs(
     *,
     sheet: str = "",
 ) -> list[str]:
-    """Render selected pages with visible hop-overs for visual verification."""
-    pages = [
-        str(page["number"])
+    """Render the selected schematic sources with visible hop-overs."""
+    selected_pages = [
+        page
         for page in snapshot["schematic"]["sheets"]
         if not sheet or sheet.casefold() in str(page["name"]).casefold()
     ]
-    if sheet and not pages:
+    if sheet and not selected_pages:
         raise ValueError(f"sheet filter matched no pages: {sheet}")
+    targets = (
+        [schematic.parent / str(page["file"]) for page in selected_pages]
+        if sheet
+        else [schematic]
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
-    command = [
-        _kicad_cli(),
-        "sch",
-        "export",
-        "svg",
-        str(schematic),
-        "-o",
-        str(output_dir),
-        "--exclude-drawing-sheet",
-        "--draw-hop-over",
-    ]
-    if pages:
-        command.extend(["--pages", ",".join(pages)])
-    process = subprocess.run(command, check=False, capture_output=True, text=True)
-    if process.returncode != 0:
-        diagnostic = process.stderr.strip() or process.stdout.strip()
-        raise RuntimeError(f"KiCad SVG export failed: {diagnostic}")
-    return [str(path) for path in sorted(output_dir.glob("*.svg"))]
+    artifacts: list[str] = []
+    for target in targets:
+        expected = output_dir / f"{target.stem}.svg"
+        expected.unlink(missing_ok=True)
+        command = [
+            _kicad_cli(),
+            "sch",
+            "export",
+            "svg",
+            str(target),
+            "-o",
+            str(output_dir),
+            "--exclude-drawing-sheet",
+            "--draw-hop-over",
+        ]
+        process = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            cwd=target.parent,
+        )
+        if process.returncode != 0 or not expected.is_file():
+            diagnostic = process.stderr.strip() or process.stdout.strip()
+            raise RuntimeError(f"KiCad SVG export failed for {target.name}: {diagnostic}")
+        artifacts.append(str(expected))
+    return artifacts
 
 
 def verification_report(
