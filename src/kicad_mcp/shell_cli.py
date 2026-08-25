@@ -27,10 +27,12 @@ from pydantic import BaseModel
 from .config import reset_config
 from .deep_inspection import (
     ascii_map,
+    connectivity_proof,
     filter_snapshot,
     placement_plan,
     project_snapshot,
     route_plan,
+    verification_report,
 )
 from .server import build_server
 from .tools.router import TOOL_CATEGORIES, available_profiles
@@ -422,6 +424,28 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.add_argument("--ref", dest="reference", default="", help="filter by exact reference")
     inspect.add_argument("--format", choices=("json", "jsonl"), default="json")
 
+    prove = subcommands.add_parser(
+        "prove", help="emit pin-to-net-to-peer connectivity evidence from KiCad's netlist"
+    )
+    prove.add_argument("--sheet", default="", help="filter by hierarchical sheet substring")
+    prove.add_argument("--net", default="", help="filter by net-name substring")
+    prove.add_argument("--ref", dest="reference", default="", help="filter by exact reference")
+    prove.add_argument("--format", choices=("json", "jsonl"), default="json")
+
+    verify = subcommands.add_parser(
+        "verify", help="bundle source integrity, connectivity proof, ERC, and SVG evidence"
+    )
+    verify.add_argument("--sheet", default="", help="filter by hierarchical sheet substring")
+    verify.add_argument("--net", default="", help="filter by net-name substring")
+    verify.add_argument("--ref", dest="reference", default="", help="filter by exact reference")
+    verify.add_argument(
+        "--artifacts",
+        default="",
+        metavar="DIR",
+        help="render selected schematic pages as SVG into DIR",
+    )
+    verify.add_argument("--format", choices=("json", "jsonl"), default="json")
+
     map_command = subcommands.add_parser(
         "map", help="render a zoomable-in-spirit ASCII/Unicode project map"
     )
@@ -524,6 +548,74 @@ def main(argv: Sequence[str] | None = None) -> None:
                     )
             else:
                 print(json.dumps(snapshot, indent=2, sort_keys=True))
+            return
+        if args.command == "prove":
+            proof = connectivity_proof(
+                project_snapshot(args.project_dir or "."),
+                sheet=args.sheet,
+                net=args.net,
+                reference=args.reference,
+            )
+            if args.format == "jsonl":
+                print(
+                    json.dumps(
+                        {
+                            "section": "summary",
+                            "status": proof["status"],
+                            "data": proof["summary"],
+                            "findings": proof["findings"],
+                        },
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                )
+                for pin in proof["pins"]:
+                    print(
+                        json.dumps(
+                            {"section": "pin", **pin},
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        )
+                    )
+            else:
+                print(json.dumps(proof, indent=2, sort_keys=True))
+            if proof["status"] == "fail":
+                raise SystemExit(3)
+            return
+        if args.command == "verify":
+            report = verification_report(
+                args.project_dir or ".",
+                sheet=args.sheet,
+                net=args.net,
+                reference=args.reference,
+                artifacts_dir=args.artifacts or None,
+            )
+            if args.format == "jsonl":
+                print(
+                    json.dumps(
+                        {
+                            "section": "summary",
+                            "project": report["project"],
+                            "filters": report["filters"],
+                            "status": report["status"],
+                            "artifacts": report["artifacts"],
+                        },
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                )
+                for name, check in report["checks"].items():
+                    print(
+                        json.dumps(
+                            {"section": "check", "name": name, **check},
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        )
+                    )
+            else:
+                print(json.dumps(report, indent=2, sort_keys=True))
+            if report["status"] == "fail":
+                raise SystemExit(3)
             return
         if args.command == "map":
             snapshot = filter_snapshot(

@@ -10,7 +10,14 @@ from pathlib import Path
 from mcp import types as mcp_types
 
 from kicad_mcp.compact_server import server as compact_server
-from kicad_mcp.deep_inspection import ascii_map, filter_snapshot, placement_plan, route_plan
+from kicad_mcp.deep_inspection import (
+    _source_integrity_evidence,
+    ascii_map,
+    connectivity_proof,
+    filter_snapshot,
+    placement_plan,
+    route_plan,
+)
 from kicad_mcp.shell_cli import parse_call_arguments, result_envelope
 
 
@@ -103,6 +110,67 @@ def test_deep_filter_and_ascii_zoom() -> None:
     assert "COMPONENT MAP" in ascii_map(snapshot, zoom=1)
     assert "GPIO" in ascii_map(snapshot, zoom=2)
     assert "PCB MAP" in ascii_map(snapshot, zoom=3)
+
+
+def test_connectivity_proof_expands_pin_net_and_peer_evidence() -> None:
+    proof = connectivity_proof(_snapshot(), reference="U1")
+
+    assert proof["status"] == "pass"
+    assert proof["summary"] == {
+        "components": 1,
+        "pins": 1,
+        "nets": 1,
+        "unconnected_pins": 0,
+        "intentional_no_connects": 0,
+        "singleton_nets": 0,
+        "missing_footprints": 0,
+        "duplicate_pin_assignments": 0,
+        "board_net_mismatches": 0,
+    }
+    assert proof["pins"][0]["net"] == "GPIO"
+    assert proof["pins"][0]["peers"] == [
+        {"reference": "R1", "pin": "1", "function": "", "type": "passive"}
+    ]
+    assert proof["pins"][0]["board_pad_net"] == "GPIO"
+
+
+def test_connectivity_proof_does_not_leak_findings_from_filtered_components() -> None:
+    snapshot = _snapshot()
+    snapshot["schematic"]["nets"].append(
+        {
+            "name": "unconnected-(U2-Pad1)",
+            "unconnected": True,
+            "nodes": [
+                {"reference": "U2", "pin": "1", "function": "NC", "type": "no_connect"}
+            ],
+        }
+    )
+
+    proof = connectivity_proof(snapshot, reference="U1")
+
+    assert proof["status"] == "pass"
+    assert proof["findings"]["singleton_nets"] == []
+
+
+def test_source_integrity_evidence_is_sheet_scoped(tmp_path: Path) -> None:
+    top = tmp_path / "demo.kicad_pro"
+    top.write_text("{}", encoding="utf-8")
+    power = tmp_path / "power.kicad_sch"
+    power.write_text(
+        '(kicad_sch (uuid "00000000-0000-0000-0000-000000000001"))\n',
+        encoding="utf-8",
+    )
+    ignored = tmp_path / "ignored.kicad_sch"
+    ignored.write_text("(kicad_sch", encoding="utf-8")
+    snapshot = _snapshot()
+    snapshot["schematic"]["sheets"].append(
+        {"number": 2, "name": "/Ignored/", "file": "ignored.kicad_sch"}
+    )
+
+    evidence = _source_integrity_evidence(top, snapshot, sheet="Power")
+
+    assert evidence["status"] == "pass"
+    assert evidence["files"] == [str(power)]
 
 
 def test_route_plan_is_dry_and_refuses_critical_nets() -> None:

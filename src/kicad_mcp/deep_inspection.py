@@ -7,6 +7,7 @@ emits ordinary Python/JSON values for shell pipelines.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
@@ -315,6 +316,307 @@ def filter_snapshot(
         **snapshot,
         "schematic": {**schematic, "components": components, "nets": nets},
         "board": {**board, "footprints": footprints},
+    }
+
+
+def connectivity_proof(
+    snapshot: JsonRecord,
+    *,
+    sheet: str = "",
+    reference: str = "",
+    net: str = "",
+) -> JsonRecord:
+    """Return deterministic pin-to-net-to-peer evidence for shell review.
+
+    KiCad's exported netlist is the authority here.  The report intentionally
+    repeats peer information for each selected pin so an LLM or a jq pipeline
+    can answer connectivity questions without reconstructing a graph from raw
+    schematic S-expressions.
+    """
+    schematic = snapshot["schematic"]
+    components = list(schematic["components"])
+    if sheet:
+        components = [item for item in components if sheet.casefold() in item["sheet"].casefold()]
+    if reference:
+        components = [
+            item for item in components if item["reference"].casefold() == reference.casefold()
+        ]
+    selected_refs = {item["reference"] for item in components}
+    footprints = {item["reference"]: item for item in snapshot["board"]["footprints"]}
+    rows: list[JsonRecord] = []
+    seen_pins: dict[tuple[str, str], list[str]] = {}
+    singleton_nets: set[str] = set()
+    unconnected_pins = 0
+    intentional_no_connects = 0
+
+    for candidate in schematic["nets"]:
+        net_name = str(candidate["name"])
+        if net and net.casefold() not in net_name.casefold():
+            continue
+        nodes = list(candidate["nodes"])
+        selected_nodes = [node for node in nodes if node["reference"] in selected_refs]
+        intentional_nodes = [
+            node for node in selected_nodes if "+no_connect" in str(node.get("type", ""))
+        ]
+        if len(nodes) == 1 and selected_nodes and not intentional_nodes:
+            singleton_nets.add(net_name)
+        for node in selected_nodes:
+            key = (str(node["reference"]), str(node["pin"]))
+            seen_pins.setdefault(key, []).append(net_name)
+            peers = [
+                {
+                    "reference": str(peer["reference"]),
+                    "pin": str(peer["pin"]),
+                    "function": str(peer.get("function", "")),
+                    "type": str(peer.get("type", "")),
+                }
+                for peer in nodes
+                if (str(peer["reference"]), str(peer["pin"])) != key
+            ]
+            is_unconnected = bool(candidate["unconnected"])
+            intentional_no_connect = "+no_connect" in str(node.get("type", ""))
+            unconnected_pins += int(is_unconnected and not intentional_no_connect)
+            intentional_no_connects += int(intentional_no_connect)
+            rows.append(
+                {
+                    "reference": key[0],
+                    "pin": key[1],
+                    "function": str(node.get("function", "")),
+                    "type": str(node.get("type", "")),
+                    "net": net_name,
+                    "unconnected": is_unconnected,
+                    "intentional_no_connect": intentional_no_connect,
+                    "peer_count": len(peers),
+                    "peers": peers,
+                    "board_pad_net": next(
+                        (
+                            str(pad.get("net", ""))
+                            for pad in footprints.get(key[0], {}).get("pads", [])
+                            if str(pad.get("number", "")) == key[1]
+                        ),
+                        "",
+                    ),
+                }
+            )
+
+    duplicate_assignments = [
+        {"reference": key[0], "pin": key[1], "nets": names}
+        for key, names in sorted(seen_pins.items())
+        if len(set(names)) > 1
+    ]
+    missing_footprints = sorted(
+        item["reference"] for item in components if not item.get("footprint")
+    )
+    board_mismatches = [
+        {
+            "reference": row["reference"],
+            "pin": row["pin"],
+            "schematic_net": row["net"],
+            "board_net": row["board_pad_net"],
+        }
+        for row in rows
+        if row["board_pad_net"] and row["board_pad_net"] != row["net"]
+    ]
+    status = "fail" if duplicate_assignments or board_mismatches else "review"
+    if (
+        not unconnected_pins
+        and not singleton_nets
+        and not missing_footprints
+        and status == "review"
+    ):
+        status = "pass"
+    return {
+        "schema_version": "1.0",
+        "project": snapshot["project"]["name"],
+        "filters": {"sheet": sheet, "reference": reference, "net": net},
+        "status": status,
+        "summary": {
+            "components": len(components),
+            "pins": len(rows),
+            "nets": len({row["net"] for row in rows}),
+            "unconnected_pins": unconnected_pins,
+            "intentional_no_connects": intentional_no_connects,
+            "singleton_nets": len(singleton_nets),
+            "missing_footprints": len(missing_footprints),
+            "duplicate_pin_assignments": len(duplicate_assignments),
+            "board_net_mismatches": len(board_mismatches),
+        },
+        "findings": {
+            "singleton_nets": sorted(singleton_nets),
+            "missing_footprints": missing_footprints,
+            "duplicate_pin_assignments": duplicate_assignments,
+            "board_net_mismatches": board_mismatches,
+        },
+        "pins": sorted(rows, key=lambda row: (row["reference"], row["pin"], row["net"])),
+    }
+
+
+def _erc_evidence(schematic: Path, *, sheet: str = "") -> JsonRecord:
+    """Run KiCad ERC and return stable, optionally sheet-scoped evidence."""
+    with tempfile.TemporaryDirectory(prefix="kicadq-erc-") as temporary:
+        output = Path(temporary) / "erc.json"
+        process = subprocess.run(
+            [
+                _kicad_cli(),
+                "sch",
+                "erc",
+                str(schematic),
+                "--format",
+                "json",
+                "--severity-all",
+                "-o",
+                str(output),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if process.returncode != 0 or not output.is_file():
+            diagnostic = process.stderr.strip() or process.stdout.strip()
+            raise RuntimeError(f"KiCad ERC failed: {diagnostic}")
+        payload = json.loads(output.read_text(encoding="utf-8"))
+
+    findings: list[JsonRecord] = []
+    matched_sheets: list[str] = []
+    for page in payload.get("sheets", []):
+        path = str(page.get("path", ""))
+        if sheet and sheet.casefold() not in path.casefold():
+            continue
+        matched_sheets.append(path)
+        for violation in page.get("violations", []):
+            findings.append({"sheet": path, **violation})
+    errors = sum(item.get("severity") == "error" for item in findings)
+    warnings = sum(item.get("severity") == "warning" for item in findings)
+    return {
+        "status": "fail" if errors else "review" if warnings else "pass",
+        "summary": {
+            "sheets": len(matched_sheets),
+            "violations": len(findings),
+            "errors": errors,
+            "warnings": warnings,
+        },
+        "findings": findings,
+        "matched_sheets": matched_sheets,
+        "kicad_version": payload.get("kicad_version", ""),
+    }
+
+
+def _source_integrity_evidence(
+    project: Path, snapshot: JsonRecord, *, sheet: str = ""
+) -> JsonRecord:
+    """Check selected schematic sources for transaction-breaking corruption."""
+    from .tools.schematic import _duplicate_uuids, _validate_schematic_text
+
+    findings: list[JsonRecord] = []
+    checked: list[str] = []
+    for page in snapshot["schematic"]["sheets"]:
+        if sheet and sheet.casefold() not in str(page["name"]).casefold():
+            continue
+        path = project.parent / str(page["file"])
+        checked.append(str(path))
+        try:
+            content = path.read_text(encoding="utf-8")
+            _validate_schematic_text(content)
+        except (OSError, ValueError) as exc:
+            findings.append({"file": str(path), "type": "invalid_schematic", "detail": str(exc)})
+            continue
+        duplicates = sorted(_duplicate_uuids(content))
+        if duplicates:
+            findings.append(
+                {
+                    "file": str(path),
+                    "type": "duplicate_element_uuids",
+                    "detail": duplicates,
+                }
+            )
+        whitespace_lines = len(re.findall(r"(?m)^[ \t]+$", content))
+        if whitespace_lines:
+            findings.append(
+                {
+                    "file": str(path),
+                    "type": "whitespace_only_lines",
+                    "detail": whitespace_lines,
+                }
+            )
+        if "<<<<<<<" in content or ">>>>>>>" in content:
+            findings.append(
+                {"file": str(path), "type": "merge_conflict_markers", "detail": True}
+            )
+    return {
+        "status": "fail" if findings else "pass",
+        "summary": {"files": len(checked), "findings": len(findings)},
+        "findings": findings,
+        "files": checked,
+    }
+
+
+def _render_verification_svgs(
+    schematic: Path,
+    snapshot: JsonRecord,
+    output_dir: Path,
+    *,
+    sheet: str = "",
+) -> list[str]:
+    """Render selected pages with visible hop-overs for visual verification."""
+    pages = [
+        str(page["number"])
+        for page in snapshot["schematic"]["sheets"]
+        if not sheet or sheet.casefold() in str(page["name"]).casefold()
+    ]
+    if sheet and not pages:
+        raise ValueError(f"sheet filter matched no pages: {sheet}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    command = [
+        _kicad_cli(),
+        "sch",
+        "export",
+        "svg",
+        str(schematic),
+        "-o",
+        str(output_dir),
+        "--exclude-drawing-sheet",
+        "--draw-hop-over",
+    ]
+    if pages:
+        command.extend(["--pages", ",".join(pages)])
+    process = subprocess.run(command, check=False, capture_output=True, text=True)
+    if process.returncode != 0:
+        diagnostic = process.stderr.strip() or process.stdout.strip()
+        raise RuntimeError(f"KiCad SVG export failed: {diagnostic}")
+    return [str(path) for path in sorted(output_dir.glob("*.svg"))]
+
+
+def verification_report(
+    project_dir: str | Path,
+    *,
+    sheet: str = "",
+    reference: str = "",
+    net: str = "",
+    artifacts_dir: str | Path | None = None,
+) -> JsonRecord:
+    """Bundle parse integrity, connectivity proof, ERC, and optional SVG evidence."""
+    project, schematic, _board = _project_files(project_dir)
+    snapshot = project_snapshot(project_dir)
+    integrity = _source_integrity_evidence(project, snapshot, sheet=sheet)
+    proof = connectivity_proof(snapshot, sheet=sheet, reference=reference, net=net)
+    erc = _erc_evidence(schematic, sheet=sheet)
+    artifacts: list[str] = []
+    if artifacts_dir is not None:
+        artifacts = _render_verification_svgs(
+            schematic,
+            snapshot,
+            Path(artifacts_dir).expanduser().resolve(),
+            sheet=sheet,
+        )
+    statuses = {integrity["status"], proof["status"], erc["status"]}
+    status = "fail" if "fail" in statuses else "review" if "review" in statuses else "pass"
+    return {
+        "schema_version": "1.0",
+        "project": snapshot["project"],
+        "filters": {"sheet": sheet, "reference": reference, "net": net},
+        "status": status,
+        "checks": {"source_integrity": integrity, "connectivity": proof, "erc": erc},
+        "artifacts": artifacts,
     }
 
 
