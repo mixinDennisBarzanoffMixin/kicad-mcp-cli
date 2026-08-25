@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
+from heapq import heappop, heappush
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,12 @@ from .tools.board_file import (
     _iter_blocks,
     _normalize_board_content,
     _parse_board_footprint_blocks,
+)
+from .utils.placement import (
+    ForceDirectedConfig,
+    PlacementComponent,
+    PlacementNet,
+    force_directed_placement,
 )
 
 type JsonRecord = dict[str, Any]
@@ -474,13 +481,25 @@ def route_plan(
         remaining.remove(end)
 
     segments: list[JsonRecord] = []
+    collisions = 0
+    routing_methods: list[str] = []
     for start, end in edges:
-        x1, y1 = start["at"]
-        x2, y2 = end["at"]
-        candidates = [([x1, y1], [x2, y1], [x2, y2]), ([x1, y1], [x1, y2], [x2, y2])]
-        points = min(
-            candidates,
-            key=lambda candidate: _route_collision_score(candidate, board, clearance_mm),
+        excluded_refs = {str(start["reference"]), str(end["reference"])}
+        points, method = _orthogonal_route(
+            start["at"],
+            end["at"],
+            board,
+            clearance=clearance_mm,
+            excluded_refs=excluded_refs,
+            net_name=net_name,
+        )
+        routing_methods.append(method)
+        collisions += _route_collision_score(
+            points,
+            board,
+            clearance_mm,
+            excluded_refs=excluded_refs,
+            net_name=net_name,
         )
         for first, second in zip(points, points[1:], strict=False):
             if first == second:
@@ -496,14 +515,6 @@ def route_plan(
                     "net": net_name,
                 }
             )
-    collisions = sum(
-        _route_collision_score(
-            [[segment["x1"], segment["y1"]], [segment["x2"], segment["y2"]]],
-            board,
-            clearance_mm,
-        )
-        for segment in segments
-    )
     return {
         "status": "planned",
         "net": net_name,
@@ -514,10 +525,11 @@ def route_plan(
         "endpoints": endpoints,
         "segments": segments,
         "notes": [
-            "Manhattan/MST proposal only; KiCad DRC remains authoritative.",
+            "Obstacle-aware orthogonal/MST proposal only; KiCad DRC remains authoritative.",
             "Review geometry before applying; no differential-pair or impedance solver is used.",
         ],
         "collision_score": collisions,
+        "routing_methods": routing_methods,
     }
 
 
@@ -525,6 +537,9 @@ def _route_collision_score(
     points: list[list[float]] | tuple[list[float], ...],
     board: JsonRecord,
     clearance: float,
+    *,
+    excluded_refs: set[str] | None = None,
+    net_name: str = "",
 ) -> int:
     if len(points) < 2:
         return 0
@@ -533,6 +548,8 @@ def _route_collision_score(
         sx1, sx2 = sorted((first[0], second[0]))
         sy1, sy2 = sorted((first[1], second[1]))
         for footprint in board["footprints"]:
+            if str(footprint["reference"]) in (excluded_refs or set()):
+                continue
             cx = float(footprint["x_mm"])
             cy = float(footprint["y_mm"])
             half_width = float(footprint["width_mm"]) / 2 + clearance
@@ -545,4 +562,231 @@ def _route_collision_score(
             )
             if overlaps:
                 score += 1
+        for track in board.get("tracks", []):
+            if track.get("net") == net_name:
+                continue
+            if track.get("layer") not in {None, "F.Cu", "B.Cu"}:
+                continue
+            if _segments_intersect(first, second, track["start"], track["end"], clearance):
+                score += 1
     return score
+
+
+def _segments_intersect(
+    first: list[float],
+    second: list[float],
+    other_first: list[float],
+    other_second: list[float],
+    clearance: float,
+) -> bool:
+    left, right = sorted((first[0], second[0]))
+    top, bottom = sorted((first[1], second[1]))
+    other_left, other_right = sorted((other_first[0], other_second[0]))
+    other_top, other_bottom = sorted((other_first[1], other_second[1]))
+    return not (
+        right + clearance < other_left
+        or other_right + clearance < left
+        or bottom + clearance < other_top
+        or other_bottom + clearance < top
+    )
+
+
+def _compress_grid_path(points: list[list[float]]) -> list[list[float]]:
+    if len(points) < 3:
+        return points
+    compressed = [points[0]]
+    previous_direction: tuple[int, int] | None = None
+    for index in range(1, len(points)):
+        dx = points[index][0] - points[index - 1][0]
+        dy = points[index][1] - points[index - 1][1]
+        direction = (
+            0 if dx == 0 else (1 if dx > 0 else -1),
+            0 if dy == 0 else (1 if dy > 0 else -1),
+        )
+        if previous_direction is not None and direction != previous_direction:
+            compressed.append(points[index - 1])
+        previous_direction = direction
+    compressed.append(points[-1])
+    return compressed
+
+
+def _orthogonal_route(
+    start: list[float],
+    end: list[float],
+    board: JsonRecord,
+    *,
+    clearance: float,
+    excluded_refs: set[str],
+    net_name: str,
+    grid_mm: float = 0.5,
+) -> tuple[list[list[float]], str]:
+    """Return a collision-free orthogonal path when the board geometry permits it."""
+    x1, y1 = map(float, start)
+    x2, y2 = map(float, end)
+    candidates = [([x1, y1], [x2, y1], [x2, y2]), ([x1, y1], [x1, y2], [x2, y2])]
+    candidate_scores = [
+        _route_collision_score(
+            candidate,
+            board,
+            clearance,
+            excluded_refs=excluded_refs,
+            net_name=net_name,
+        )
+        for candidate in candidates
+    ]
+    best_index = min(range(len(candidates)), key=candidate_scores.__getitem__)
+    if candidate_scores[best_index] == 0:
+        return list(candidates[best_index]), "direct-manhattan"
+
+    bounds = board.get("bounds_mm")
+    if not bounds:
+        return list(candidates[best_index]), "fallback-manhattan"
+    left, top, right, bottom = map(float, bounds)
+    columns = max(1, round((right - left) / grid_mm))
+    rows = max(1, round((bottom - top) / grid_mm))
+
+    def grid(point: list[float]) -> tuple[int, int]:
+        return (
+            max(0, min(columns, round((float(point[0]) - left) / grid_mm))),
+            max(0, min(rows, round((float(point[1]) - top) / grid_mm))),
+        )
+
+    def world(node: tuple[int, int]) -> list[float]:
+        return [round(left + node[0] * grid_mm, 4), round(top + node[1] * grid_mm, 4)]
+
+    start_node, end_node = grid(start), grid(end)
+    frontier: list[tuple[float, float, tuple[int, int]]] = []
+    heappush(frontier, (0.0, 0.0, start_node))
+    came_from: dict[tuple[int, int], tuple[int, int] | None] = {start_node: None}
+    cost: dict[tuple[int, int], float] = {start_node: 0.0}
+    while frontier:
+        _priority, current_cost, current = heappop(frontier)
+        if current == end_node:
+            break
+        for dx, dy in ((1, 0), (0, 1), (-1, 0), (0, -1)):
+            neighbor = (current[0] + dx, current[1] + dy)
+            if not (0 <= neighbor[0] <= columns and 0 <= neighbor[1] <= rows):
+                continue
+            segment = [world(current), world(neighbor)]
+            if neighbor != end_node and _route_collision_score(
+                segment,
+                board,
+                clearance,
+                excluded_refs=excluded_refs,
+                net_name=net_name,
+            ):
+                continue
+            next_cost = current_cost + 1.0
+            if next_cost >= cost.get(neighbor, math.inf):
+                continue
+            cost[neighbor] = next_cost
+            heuristic = abs(neighbor[0] - end_node[0]) + abs(neighbor[1] - end_node[1])
+            heappush(frontier, (next_cost + heuristic, next_cost, neighbor))
+            came_from[neighbor] = current
+
+    if end_node not in came_from:
+        return list(candidates[best_index]), "fallback-manhattan"
+    nodes = [end_node]
+    while came_from[nodes[-1]] is not None:
+        nodes.append(came_from[nodes[-1]])  # type: ignore[arg-type]
+    nodes.reverse()
+    path = [list(start)] + [world(node) for node in nodes[1:-1]] + [list(end)]
+    return _compress_grid_path(path), "astar-grid"
+
+
+def placement_plan(
+    snapshot: JsonRecord,
+    *,
+    fixed_references: Iterable[str] = (),
+    keepout_regions: Iterable[list[float]] = (),
+    margin_mm: float = 3.0,
+    iterations: int = 300,
+    grid_mm: float = 0.5,
+    seed: int = 42,
+) -> JsonRecord:
+    """Generate a deterministic connectivity-aware placement proposal without editing."""
+    board = snapshot["board"]
+    bounds = board.get("bounds_mm")
+    footprints = list(board.get("footprints", []))
+    if not bounds:
+        return {"status": "blocked", "reason": "board has no Edge.Cuts outline", "placements": []}
+    if not footprints:
+        return {"status": "blocked", "reason": "board has no footprints", "placements": []}
+    left, top, right, bottom = map(float, bounds)
+    width, height = right - left, bottom - top
+    fixed = set(fixed_references)
+    components = [
+        PlacementComponent(
+            ref=str(item["reference"]),
+            x=float(item["x_mm"]) - left,
+            y=float(item["y_mm"]) - top,
+            w=float(item["width_mm"]) + margin_mm,
+            h=float(item["height_mm"]) + margin_mm,
+            fixed=str(item["reference"]) in fixed,
+        )
+        for item in footprints
+        if item.get("x_mm") is not None and item.get("y_mm") is not None
+    ]
+    known_refs = {component.ref for component in components}
+    nets: list[PlacementNet] = []
+    for net in snapshot["schematic"]["nets"]:
+        refs = sorted({str(node["reference"]) for node in net["nodes"]} & known_refs)
+        if len(refs) < 2 or net.get("unconnected"):
+            continue
+        weight = round(2.0 / math.sqrt(len(refs)), 4)
+        if any(pattern.search(str(net["name"])) for pattern in CRITICAL_NET_PATTERNS):
+            weight *= 0.35
+        nets.append(PlacementNet(name=str(net["name"]), refs=refs, weight=weight))
+    local_keepouts = [
+        (
+            float(region[0]) - left,
+            float(region[1]) - top,
+            float(region[2]) - left,
+            float(region[3]) - top,
+        )
+        for region in keepout_regions
+    ]
+    stats: dict[str, object] = {}
+    proposed = force_directed_placement(
+        components,
+        nets,
+        ForceDirectedConfig(
+            iterations=iterations,
+            board_w=width,
+            board_h=height,
+            seed=seed,
+            grid_mm=grid_mm,
+            keepout_regions=local_keepouts,
+        ),
+        stats=stats,
+    )
+    original = {component.ref: component for component in components}
+    placements = [
+        {
+            "reference": component.ref,
+            "from": [
+                round(original[component.ref].x + left, 4),
+                round(original[component.ref].y + top, 4),
+            ],
+            "to": [round(component.x + left, 4), round(component.y + top, 4)],
+            "fixed": component.fixed,
+        }
+        for component in proposed
+    ]
+    return {
+        "status": "planned",
+        "board_bounds_mm": list(bounds),
+        "margin_mm": margin_mm,
+        "grid_mm": grid_mm,
+        "seed": seed,
+        "iterations": iterations,
+        "iterations_run": stats.get("iterations_run"),
+        "converged": stats.get("converged"),
+        "nets_considered": len(nets),
+        "placements": placements,
+        "notes": [
+            "Connectivity-aware proposal only; connector, RF, thermal, and mechanical "
+            "constraints remain authoritative.",
+            "Review and lock mechanical anchors before applying any coordinates.",
+        ],
+    }

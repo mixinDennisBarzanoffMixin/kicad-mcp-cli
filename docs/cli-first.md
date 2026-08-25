@@ -47,15 +47,30 @@ kicadq -C ./board map --zoom 2 --net SPI    # pin-level nets
 kicadq -C ./board map --zoom 3 --width 120  # PCB geometry
 ```
 
-Route planning is a dry run by default. Critical power, ground, RF, clock, and
-USB differential nets are refused unless explicitly overridden. Applying a plan
-also requires write mode and a second confirmation flag; the live KiCad backend
-performs the actual track creation.
+Route planning is a dry run by default. It first tries direct Manhattan geometry,
+then uses a deterministic grid/A* search around footprint and existing-track
+obstacles. Critical power, ground, RF, clock, and USB differential nets are
+refused unless explicitly overridden. Applying a plan also requires write mode
+and a second confirmation flag; the live KiCad backend performs the actual track
+creation.
 
 ```bash
 kicadq -C ./board route GPIO17 | jq '.segments'
 kicadq -C ./board --mode write route GPIO17 --apply --yes
 ```
+
+Placement planning is also dry-run-first. It derives weighted component
+connectivity from the schematic, respects `Edge.Cuts`, lets mechanical anchors
+stay fixed, and accepts absolute rectangular keepouts. The result is ordinary
+JSON suitable for `jq`, review, and diffs.
+
+```bash
+kicadq -C ./board place --fix J1 --fix J2 --keepout 0,0,25,12 | jq '.placements'
+kicadq -C ./board --mode write place --fix J1 --apply --yes
+```
+
+Both planners are proposals, not substitutes for KiCad DRC or electrical,
+thermal, RF, and mechanical review.
 
 ## Compact MCP facade
 

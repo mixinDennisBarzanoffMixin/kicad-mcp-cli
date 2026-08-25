@@ -25,7 +25,13 @@ from mcp import types as mcp_types
 from pydantic import BaseModel
 
 from .config import reset_config
-from .deep_inspection import ascii_map, filter_snapshot, project_snapshot, route_plan
+from .deep_inspection import (
+    ascii_map,
+    filter_snapshot,
+    placement_plan,
+    project_snapshot,
+    route_plan,
+)
 from .server import build_server
 from .tools.router import TOOL_CATEGORIES, available_profiles
 
@@ -436,6 +442,32 @@ def build_parser() -> argparse.ArgumentParser:
     route.add_argument("--apply", action="store_true")
     route.add_argument("--yes", action="store_true", help="confirm route mutation")
     route.add_argument("--format", choices=("json", "jsonl"), default="json")
+
+    place = subcommands.add_parser(
+        "place", help="plan connectivity-aware PCB placement from existing footprints"
+    )
+    place.add_argument(
+        "--fix",
+        dest="fixed_references",
+        action="append",
+        default=[],
+        help="hold one mechanical anchor reference fixed; repeatable",
+    )
+    place.add_argument(
+        "--keepout",
+        dest="keepout_regions",
+        action="append",
+        default=[],
+        metavar="X1,Y1,X2,Y2",
+        help="absolute board keepout rectangle in mm; repeatable",
+    )
+    place.add_argument("--margin", type=float, default=3.0, dest="margin_mm")
+    place.add_argument("--iterations", type=int, default=300)
+    place.add_argument("--grid", type=float, default=0.5, dest="grid_mm")
+    place.add_argument("--seed", type=int, default=42)
+    place.add_argument("--apply", action="store_true")
+    place.add_argument("--yes", action="store_true", help="confirm placement mutation")
+    place.add_argument("--format", choices=("json", "jsonl"), default="json")
     return parser
 
 
@@ -536,6 +568,65 @@ def main(argv: Sequence[str] | None = None) -> None:
             )
             if plan["status"] == "refused":
                 raise SystemExit(3)
+            if plan["status"] == "blocked":
+                raise SystemExit(4)
+            return
+        if args.command == "place":
+            keepouts: list[list[float]] = []
+            for raw in args.keepout_regions:
+                values = [float(value.strip()) for value in raw.split(",")]
+                if len(values) != 4:
+                    raise ValueError("--keepout requires X1,Y1,X2,Y2")
+                keepouts.append(values)
+            plan = placement_plan(
+                project_snapshot(args.project_dir or "."),
+                fixed_references=args.fixed_references,
+                keepout_regions=keepouts,
+                margin_mm=args.margin_mm,
+                iterations=args.iterations,
+                grid_mm=args.grid_mm,
+                seed=args.seed,
+            )
+            if args.apply:
+                if args.mode not in {"write", "experimental"}:
+                    raise ValueError("--apply requires --mode write or --mode experimental")
+                if not args.yes:
+                    raise ValueError("--apply requires --yes after reviewing the placement plan")
+                if plan["status"] != "planned":
+                    reason = plan.get("reason", plan["status"])
+                    raise ValueError(f"placement cannot be applied: {reason}")
+                results = []
+                for placement in plan["placements"]:
+                    if placement["fixed"] or placement["from"] == placement["to"]:
+                        continue
+                    x_mm, y_mm = placement["to"]
+                    result = asyncio.run(
+                        invoke_backend_tool(
+                            args,
+                            "pcb_move_footprint",
+                            {
+                                "reference": placement["reference"],
+                                "x_mm": x_mm,
+                                "y_mm": y_mm,
+                                "rotation_deg": 0.0,
+                            },
+                        )
+                    )
+                    results.append(result)
+                    if not result["ok"]:
+                        raise RuntimeError(
+                            f"backend rejected placement for {placement['reference']}"
+                        )
+                plan["apply_results"] = results
+            indent = 2 if args.format == "json" else None
+            print(
+                json.dumps(
+                    plan,
+                    indent=indent,
+                    separators=None if indent else (",", ":"),
+                    sort_keys=True,
+                )
+            )
             if plan["status"] == "blocked":
                 raise SystemExit(4)
             return

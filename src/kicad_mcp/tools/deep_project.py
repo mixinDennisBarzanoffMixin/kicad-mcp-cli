@@ -7,7 +7,13 @@ import json
 from mcp.server.fastmcp import FastMCP
 
 from ..config import get_config
-from ..deep_inspection import ascii_map, filter_snapshot, project_snapshot, route_plan
+from ..deep_inspection import (
+    ascii_map,
+    filter_snapshot,
+    placement_plan,
+    project_snapshot,
+    route_plan,
+)
 from .metadata import headless_compatible
 
 
@@ -81,5 +87,32 @@ def register(mcp: FastMCP) -> None:
             width_mm=width_mm,
             clearance_mm=clearance_mm,
             allow_critical=allow_critical,
+        )
+        return json.dumps(plan, indent=2, sort_keys=True)
+
+    @mcp.tool()
+    @headless_compatible
+    def pcb_get_placement_plan(
+        fixed_references: list[str] | None = None,
+        keepout_regions: list[list[float]] | None = None,
+        margin_mm: float = 3.0,
+        iterations: int = 300,
+        grid_mm: float = 0.5,
+        seed: int = 42,
+    ) -> str:
+        """Dry-run deterministic, connectivity-aware placement for existing footprints.
+
+        Coordinates are constrained to Edge.Cuts and optional rectangular keepouts.
+        This never edits the board; mechanical anchors should be passed as fixed
+        references and every proposal should be reviewed before application.
+        """
+        plan = placement_plan(
+            project_snapshot(get_config().project_root),
+            fixed_references=fixed_references or [],
+            keepout_regions=keepout_regions or [],
+            margin_mm=margin_mm,
+            iterations=iterations,
+            grid_mm=grid_mm,
+            seed=seed,
         )
         return json.dumps(plan, indent=2, sort_keys=True)

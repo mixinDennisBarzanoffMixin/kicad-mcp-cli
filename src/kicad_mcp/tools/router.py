@@ -191,6 +191,7 @@ TOOL_CATEGORIES: dict[str, ToolCategory] = {
             "pcb_get_net_statistics",
             "pcb_net_inspector",
             "pcb_get_route_plan",
+            "pcb_get_placement_plan",
             # v3.8.0 — test point tools
             "pcb_add_test_point",
             "pcb_list_test_points",

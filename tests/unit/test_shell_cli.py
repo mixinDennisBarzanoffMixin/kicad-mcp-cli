@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 from pathlib import Path
 
 from mcp import types as mcp_types
 
 from kicad_mcp.compact_server import server as compact_server
-from kicad_mcp.deep_inspection import ascii_map, filter_snapshot, route_plan
+from kicad_mcp.deep_inspection import ascii_map, filter_snapshot, placement_plan, route_plan
 from kicad_mcp.shell_cli import parse_call_arguments, result_envelope
 
 
@@ -113,6 +114,43 @@ def test_route_plan_is_dry_and_refuses_critical_nets() -> None:
     assert plan["status"] == "planned"
     assert len(plan["segments"]) == 1
     assert refused["status"] == "refused"
+
+
+def test_route_plan_ignores_its_endpoint_footprints() -> None:
+    plan = route_plan(_snapshot(), "GPIO")
+
+    assert plan["collision_score"] == 0
+    assert plan["routing_methods"] == ["direct-manhattan"]
+
+
+def test_route_plan_uses_astar_around_footprint_obstacle() -> None:
+    snapshot = copy.deepcopy(_snapshot())
+    snapshot["board"]["footprints"].append(
+        {
+            "reference": "U2",
+            "x_mm": 10,
+            "y_mm": 5,
+            "width_mm": 3,
+            "height_mm": 3,
+            "pads": [],
+        }
+    )
+
+    plan = route_plan(snapshot, "GPIO", clearance_mm=0.5)
+
+    assert plan["collision_score"] == 0
+    assert plan["routing_methods"] == ["astar-grid"]
+    assert len(plan["segments"]) >= 3
+
+
+def test_placement_plan_is_deterministic_and_holds_fixed_references() -> None:
+    first = placement_plan(_snapshot(), fixed_references=["U1"], iterations=20)
+    second = placement_plan(_snapshot(), fixed_references=["U1"], iterations=20)
+
+    assert first == second
+    u1 = next(item for item in first["placements"] if item["reference"] == "U1")
+    assert u1["fixed"] is True
+    assert u1["from"] == u1["to"]
 
 
 def test_shell_source_does_not_use_shell_execution() -> None:
