@@ -55,3 +55,22 @@ def test_zero_exit_without_svg_is_reported_as_failure(tmp_path: Path, monkeypatc
     )
 
     assert result.startswith("Footprint SVG export failed:")
+
+
+def test_unchanged_stale_svg_does_not_count_as_new_export(
+    tmp_path: Path, monkeypatch
+) -> None:
+    library = tmp_path / "Demo.pretty"
+    library.mkdir()
+    output = tmp_path / "svg-output"
+    output.mkdir()
+    (output / "MissingPart.svg").write_text("<svg>stale</svg>", encoding="utf-8")
+    monkeypatch.setattr(fp, "_run_cli", lambda *_args: (0, "Done.", ""))
+
+    result = _tool(tmp_path, monkeypatch).fn(
+        input_path="Demo.pretty",
+        footprint="MissingPart",
+        output_dir="svg-output",
+    )
+
+    assert result.startswith("Footprint SVG export failed:")

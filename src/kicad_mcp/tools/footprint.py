@@ -164,13 +164,6 @@ def register(mcp: FastMCP) -> None:
             for path in out_dir.glob("*.svg")
         }
         written = sorted(path for path, state in after.items() if before.get(path) != state)
-        if selected_footprint:
-            expected = (out_dir / f"{selected_footprint}.svg").resolve()
-            if expected in after and expected not in written:
-                # A filesystem can preserve coarse timestamps for a fast
-                # overwrite. Presence of the exact requested artifact is still
-                # stronger evidence than the CLI's zero exit status alone.
-                written = [expected]
         if not written:
             detail = stderr or stdout or "kicad-cli returned success without an SVG artifact"
             return f"Footprint SVG export failed: {detail}"
