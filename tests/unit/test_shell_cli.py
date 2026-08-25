@@ -184,6 +184,14 @@ def test_route_plan_is_dry_and_refuses_critical_nets() -> None:
     assert refused["status"] == "refused"
 
 
+def test_route_and_placement_block_when_live_board_differs_from_disk() -> None:
+    snapshot = _snapshot()
+    snapshot["board"]["live_ipc"] = {"status": "connected", "semantic_match": False}
+
+    assert route_plan(snapshot, "GPIO")["status"] == "blocked"
+    assert placement_plan(snapshot)["status"] == "blocked"
+
+
 def test_route_plan_ignores_its_endpoint_footprints() -> None:
     plan = route_plan(_snapshot(), "GPIO")
 

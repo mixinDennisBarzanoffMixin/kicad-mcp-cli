@@ -189,6 +189,117 @@ def _via_records(content: str) -> list[JsonRecord]:
     return vias
 
 
+def _board_semantic_state(content: str) -> JsonRecord:
+    """Return a formatting-insensitive board state for live/disk divergence checks."""
+    normalized = _normalize_board_content(content)
+    footprints = _parse_board_footprint_blocks(normalized)
+    footprint_state = []
+    for reference, footprint in sorted(footprints.items()):
+        footprint_state.append(
+            {
+                "reference": reference,
+                "x_mm": footprint.get("x_mm"),
+                "y_mm": footprint.get("y_mm"),
+                "rotation": footprint.get("rotation"),
+                "layer": footprint.get("layer_name"),
+                "pads": sorted(
+                    (str(number), str(name))
+                    for number, name in dict(footprint.get("pad_nets", {})).items()
+                ),
+            }
+        )
+    tracks = [
+        {key: item[key] for key in ("start", "end", "width_mm", "layer", "net_code")}
+        for item in _track_records(normalized)
+    ]
+    vias = _via_records(normalized)
+    zones = []
+    for block in _iter_blocks(normalized, "zone"):
+        uuid_match = re.search(r'\(uuid\s+"([^"]+)"\)', block)
+        net_match = re.search(rf"\(net_name\s+{STRING_PATTERN}\)", block)
+        layer_match = re.search(r'\(layer\s+"([^"]+)"\)', block)
+        layers_match = re.search(r"\(layers\s+([^\)]+)\)", block)
+        zones.append(
+            {
+                "uuid": uuid_match.group(1) if uuid_match else "",
+                "net": net_match.group(1) if net_match else "",
+                "layer": layer_match.group(1) if layer_match else "",
+                "layers": " ".join(layers_match.group(1).split()) if layers_match else "",
+            }
+        )
+    nets = sorted(
+        (int(code), name)
+        for code, name in re.findall(rf"\(net\s+(\d+)\s+{STRING_PATTERN}\)", normalized)
+    )
+    return {
+        "bounds_mm": list(bounds) if (bounds := _edge_cuts_bounds(normalized)) else None,
+        "footprints": footprint_state,
+        "tracks": tracks,
+        "vias": vias,
+        "zones": sorted(zones, key=lambda item: (item["uuid"], item["net"])),
+        "nets": nets,
+    }
+
+
+def _live_board_probe(project: Path, disk_content: str) -> JsonRecord:
+    """Probe the official KiCad IPC API and compare its active board with disk."""
+    try:
+        from kipy import KiCad
+        from kipy.proto.common.types.base_types_pb2 import DocumentType
+
+        client = KiCad(timeout_ms=1500)
+        documents = client.get_open_documents(DocumentType.DOCTYPE_PCB)
+        document = next(
+            (
+                item
+                for item in documents
+                if Path(str(item.project.path)).resolve() == project.parent.resolve()
+                and str(item.board_filename) == project.with_suffix(".kicad_pcb").name
+            ),
+            None,
+        )
+        if document is None:
+            return {
+                "status": "wrong-or-closed-project",
+                "authority": "native-ipc",
+                "api_version": str(client.get_api_version()),
+                "kicad_version": str(client.get_version()),
+                "open_boards": [
+                    {"project": str(item.project.path), "file": str(item.board_filename)}
+                    for item in documents
+                ],
+                "semantic_match": None,
+            }
+        board = client.get_board()
+        live_state = _board_semantic_state(board.get_as_string())
+        disk_state = _board_semantic_state(disk_content)
+        return {
+            "status": "connected",
+            "authority": "native-ipc",
+            "api_version": str(client.get_api_version()),
+            "kicad_version": str(client.get_version()),
+            "document": {
+                "project": str(document.project.path),
+                "file": str(document.board_filename),
+            },
+            "semantic_match": live_state == disk_state,
+            "counts": {
+                "footprints": len(live_state["footprints"]),
+                "tracks": len(live_state["tracks"]),
+                "vias": len(live_state["vias"]),
+                "zones": len(live_state["zones"]),
+                "nets": len(live_state["nets"]),
+            },
+        }
+    except Exception as exc:
+        return {
+            "status": "unavailable",
+            "authority": "native-ipc",
+            "error": f"{type(exc).__name__}: {exc}",
+            "semantic_match": None,
+        }
+
+
 def _pad_positions(footprint: JsonRecord) -> list[JsonRecord]:
     root_x = float(footprint.get("x_mm") or 0.0)
     root_y = float(footprint.get("y_mm") or 0.0)
@@ -225,6 +336,7 @@ def project_snapshot(project_dir: str | Path) -> JsonRecord:
     project, schematic, board = _project_files(project_dir)
     sheets, components, nets = _schematic_snapshot(_export_netlist(schematic))
     board_content = _normalize_board_content(board.read_text(encoding="utf-8", errors="ignore"))
+    live_board = _live_board_probe(project, board_content)
     parsed_footprints = _parse_board_footprint_blocks(board_content)
     footprints: list[JsonRecord] = []
     for reference, raw in sorted(parsed_footprints.items()):
@@ -249,9 +361,10 @@ def project_snapshot(project_dir: str | Path) -> JsonRecord:
     bounds = _edge_cuts_bounds(board_content)
     copper_layers = re.findall(r'^\s*\(\d+ "(?:F|B|In\d+)\.Cu" ', board_content, re.MULTILINE)
     return {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "project": {"name": project.stem, "directory": str(project.parent)},
         "schematic": {
+            "authority": "kicad-cli-netlist",
             "sheets": sheets,
             "components": components,
             "nets": nets,
@@ -264,6 +377,8 @@ def project_snapshot(project_dir: str | Path) -> JsonRecord:
             },
         },
         "board": {
+            "authority": "file-backed-kicad-pcb",
+            "live_ipc": live_board,
             "bounds_mm": list(bounds) if bounds else None,
             "copper_layers": len(copper_layers),
             "footprints": footprints,
@@ -277,6 +392,41 @@ def project_snapshot(project_dir: str | Path) -> JsonRecord:
                 "nets": len(board_nets),
             },
         },
+    }
+
+
+def authority_report(project_dir: str | Path) -> JsonRecord:
+    """Explain which KiCad authority backs each operation in the current runtime."""
+    snapshot = project_snapshot(project_dir)
+    live = snapshot["board"]["live_ipc"]
+    live_ready = live.get("status") == "connected"
+    synchronized = live.get("semantic_match") is True
+    return {
+        "schema_version": "1.0",
+        "status": "pass" if live_ready and synchronized else "review",
+        "project": snapshot["project"],
+        "authorities": {
+            "schematic_read": "kicad-cli-netlist",
+            "schematic_write": "transactional-file-fallback",
+            "schematic_erc": "kicad-cli",
+            "schematic_render": "kicad-cli",
+            "board_read": "native-ipc" if live_ready else "file-backed-kicad-pcb",
+            "board_write": "native-ipc" if live_ready else "unavailable",
+            "board_drc": "kicad-cli",
+            "board_export": "kicad-cli",
+        },
+        "live_ipc": live,
+        "policy": {
+            "board_mutation_allowed": live_ready and synchronized,
+            "schematic_mutation_requires_transaction": True,
+            "post_edit_verify_required": True,
+        },
+        "limitations": [
+            "KiCad 10 IPC requires a running GUI instance.",
+            "KiCad 10 does not expose the required schematic editing surface; guarded file "
+            "transactions remain necessary for schematic authoring.",
+            "Board planning is blocked when live IPC and the saved board diverge.",
+        ],
     }
 
 
@@ -741,6 +891,15 @@ def route_plan(
     allow_critical: bool = False,
 ) -> JsonRecord:
     """Plan simple Manhattan segments between PCB pads; never mutates a board."""
+    live = snapshot.get("board", {}).get("live_ipc", {})
+    if live.get("status") == "connected" and live.get("semantic_match") is not True:
+        return {
+            "status": "blocked",
+            "net": net_name,
+            "reason": "live KiCad board differs from the saved board; save/reload before planning",
+            "authority": live,
+            "segments": [],
+        }
     critical = any(pattern.search(net_name) for pattern in CRITICAL_NET_PATTERNS)
     if critical and not allow_critical:
         return {
@@ -1008,6 +1167,14 @@ def placement_plan(
 ) -> JsonRecord:
     """Generate a deterministic connectivity-aware placement proposal without editing."""
     board = snapshot["board"]
+    live = board.get("live_ipc", {})
+    if live.get("status") == "connected" and live.get("semantic_match") is not True:
+        return {
+            "status": "blocked",
+            "reason": "live KiCad board differs from the saved board; save/reload before planning",
+            "authority": live,
+            "placements": [],
+        }
     bounds = board.get("bounds_mm")
     footprints = list(board.get("footprints", []))
     if not bounds:

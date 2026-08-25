@@ -27,6 +27,7 @@ from pydantic import BaseModel
 from .config import reset_config
 from .deep_inspection import (
     ascii_map,
+    authority_report,
     connectivity_proof,
     filter_snapshot,
     placement_plan,
@@ -446,6 +447,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     verify.add_argument("--format", choices=("json", "jsonl"), default="json")
 
+    backend = subcommands.add_parser(
+        "backend", help="show native IPC, CLI, and file-fallback authority for this project"
+    )
+    backend.add_argument("--format", choices=("json", "jsonl"), default="json")
+
     map_command = subcommands.add_parser(
         "map", help="render a zoomable-in-spirit ASCII/Unicode project map"
     )
@@ -616,6 +622,20 @@ def main(argv: Sequence[str] | None = None) -> None:
                 print(json.dumps(report, indent=2, sort_keys=True))
             if report["status"] == "fail":
                 raise SystemExit(3)
+            return
+        if args.command == "backend":
+            report = authority_report(args.project_dir or ".")
+            if args.format == "jsonl":
+                for section in ("authorities", "live_ipc", "policy", "limitations"):
+                    print(
+                        json.dumps(
+                            {"section": section, "data": report[section]},
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        )
+                    )
+            else:
+                print(json.dumps(report, indent=2, sort_keys=True))
             return
         if args.command == "map":
             snapshot = filter_snapshot(
