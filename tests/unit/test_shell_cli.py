@@ -23,6 +23,7 @@ from kicad_mcp.shell_cli import (
     _schematic_manifest,
     parse_call_arguments,
     result_envelope,
+    run_native_board_transaction,
 )
 
 
@@ -63,6 +64,74 @@ def test_erc_finding_keys_only_tracks_errors() -> None:
     }
 
     assert _erc_finding_keys(report) == {'{"severity":"error","type":"broken"}'}
+
+
+async def test_native_board_transaction_drops_commit_on_new_drc_finding(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import kicad_mcp.shell_cli as shell_cli
+
+    effects: list[str] = []
+
+    class FakeBoard:
+        contents = iter(["before", "staged"])
+
+        def get_as_string(self) -> str:
+            return next(self.contents)
+
+        def begin_commit(self) -> None:
+            effects.append("begin")
+
+        def drop_commit(self) -> None:
+            effects.append("drop")
+
+        def push_commit(self) -> None:
+            effects.append("push")
+
+        def save(self) -> None:
+            effects.append("save")
+
+    monkeypatch.setattr(
+        shell_cli,
+        "authority_report",
+        lambda _root: {"policy": {"board_mutation_allowed": True}},
+    )
+    monkeypatch.setattr(shell_cli, "get_board", FakeBoard)
+
+    async def invoke(_args, _tool, _arguments):
+        return {"ok": True, "tool": "pcb_move_footprint"}
+
+    monkeypatch.setattr(shell_cli, "invoke_backend_tool", invoke)
+    drc_results = iter(
+        [
+            {"finding_keys": [], "summary": {}},
+            {
+                "finding_keys": ['{"kind":"violation","type":"clearance"}'],
+                "summary": {},
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        shell_cli,
+        "board_drc_evidence",
+        lambda _root, board_content: next(drc_results),
+    )
+    args = argparse.Namespace(
+        project_dir=str(tmp_path),
+        artifacts=str(tmp_path / "evidence"),
+        profile="full",
+        mode="write",
+    )
+
+    report = await run_native_board_transaction(
+        args,
+        [("pcb_move_footprint", {"reference": "U1", "x_mm": 1, "y_mm": 2})],
+        label="placement",
+    )
+
+    assert report["status"] == "rejected"
+    assert report["committed"] is False
+    assert effects == ["begin", "drop"]
 
 
 def test_result_envelope_preserves_structured_and_text_content() -> None:

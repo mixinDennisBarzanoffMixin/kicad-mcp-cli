@@ -99,7 +99,9 @@ then uses a deterministic grid/A* search around footprint and existing-track
 obstacles. Critical power, ground, RF, clock, and USB differential nets are
 refused unless explicitly overridden. Applying a plan also requires write mode
 and a second confirmation flag; the live KiCad backend performs the actual track
-creation. Planning is blocked when live IPC and the saved board differ.
+creation. Planning is blocked when live IPC and the saved board differ. Applied
+routes are grouped in one native IPC commit, serialized without saving, checked
+with KiCad DRC, and pushed or dropped as a unit.
 
 ```bash
 kicadq -C ./board route GPIO17 | jq '.segments'
@@ -115,6 +117,11 @@ JSON suitable for `jq`, review, and diffs.
 kicadq -C ./board place --fix J1 --fix J2 --keepout 0,0,25,12 | jq '.placements'
 kicadq -C ./board --mode write place --fix J1 --apply --yes
 ```
+
+Applied placement moves use the same native commit/DRC/drop transaction. Evidence
+includes the before/staged board sources, a unified diff, and before/staged DRC
+JSON summaries under `build/kicadq-transactions/` unless `--artifacts` overrides
+the destination.
 
 Both planners are proposals, not substitutes for KiCad DRC or electrical,
 thermal, RF, and mechanical review.

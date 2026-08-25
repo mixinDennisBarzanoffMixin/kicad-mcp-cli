@@ -651,6 +651,65 @@ def _erc_evidence(schematic: Path, *, sheet: str = "") -> JsonRecord:
     }
 
 
+def board_drc_evidence(
+    project_dir: str | Path, *, board_content: str | None = None
+) -> JsonRecord:
+    """Run KiCad DRC on saved or supplied serialized board state."""
+    project, _schematic, board = _project_files(project_dir)
+    with tempfile.TemporaryDirectory(prefix="kicadq-drc-") as temporary:
+        stage = Path(temporary)
+        staged_project = stage / project.name
+        staged_board = stage / board.name
+        shutil.copy2(project, staged_project)
+        for rules in project.parent.glob("*.kicad_dru"):
+            shutil.copy2(rules, stage / rules.name)
+        staged_board.write_text(
+            board_content
+            if board_content is not None
+            else board.read_text(encoding="utf-8", errors="ignore"),
+            encoding="utf-8",
+        )
+        output = stage / "drc.json"
+        process = subprocess.run(
+            [
+                _kicad_cli(),
+                "pcb",
+                "drc",
+                str(staged_board),
+                "--format",
+                "json",
+                "--severity-all",
+                "-o",
+                str(output),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if process.returncode != 0 or not output.is_file():
+            diagnostic = process.stderr.strip() or process.stdout.strip()
+            raise RuntimeError(f"KiCad DRC failed: {diagnostic}")
+        payload = json.loads(output.read_text(encoding="utf-8"))
+    findings = [
+        {"kind": "violation", **item} for item in payload.get("violations", [])
+    ] + [
+        {"kind": "unconnected", **item} for item in payload.get("unconnected_items", [])
+    ]
+    keys = sorted(
+        json.dumps(item, sort_keys=True, separators=(",", ":")) for item in findings
+    )
+    return {
+        "status": "fail" if findings else "pass",
+        "summary": {
+            "violations": len(payload.get("violations", [])),
+            "unconnected_items": len(payload.get("unconnected_items", [])),
+        },
+        "findings": findings,
+        "finding_keys": keys,
+        "kicad_version": payload.get("kicad_version", ""),
+    }
+
+
 def _source_integrity_evidence(
     project: Path, snapshot: JsonRecord, *, sheet: str = ""
 ) -> JsonRecord:

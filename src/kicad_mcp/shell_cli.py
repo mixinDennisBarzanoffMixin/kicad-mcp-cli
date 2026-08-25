@@ -29,9 +29,11 @@ from mcp import types as mcp_types
 from pydantic import BaseModel
 
 from .config import reset_config
+from .connection import get_board
 from .deep_inspection import (
     ascii_map,
     authority_report,
+    board_drc_evidence,
     connectivity_proof,
     filter_snapshot,
     placement_plan,
@@ -468,6 +470,113 @@ async def run_staged_schematic_edit(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+async def run_native_board_transaction(
+    args: argparse.Namespace,
+    operations: list[tuple[str, dict[str, Any]]],
+    *,
+    label: str,
+) -> dict[str, Any]:
+    """Apply live PCB mutations as one IPC commit and drop on DRC regression."""
+    root = Path(args.project_dir or ".").expanduser().resolve()
+    authority = authority_report(root)
+    if not authority["policy"]["board_mutation_allowed"]:
+        return {
+            "schema_version": "1.0",
+            "status": "blocked",
+            "committed": False,
+            "reason": "native board authority is unavailable or live/disk state differs",
+            "authority": authority,
+        }
+    if not operations:
+        return {
+            "schema_version": "1.0",
+            "status": "pass",
+            "committed": False,
+            "reason": "no board mutations were necessary",
+            "authority": authority,
+        }
+    artifacts = _transaction_artifacts(root, args.artifacts, label)
+    artifacts.mkdir(parents=True, exist_ok=True)
+    board = get_board()
+    before_content = board.get_as_string()
+    (artifacts / "before.kicad_pcb").write_text(before_content, encoding="utf-8")
+    before_drc = board_drc_evidence(root, board_content=before_content)
+    results: list[dict[str, JSONValue]] = []
+    commit_active = False
+    try:
+        board.begin_commit()
+        commit_active = True
+        for tool_name, arguments in operations:
+            result = await invoke_backend_tool(args, tool_name, arguments)
+            results.append(result)
+            if not result["ok"]:
+                board.drop_commit()
+                commit_active = False
+                return {
+                    "schema_version": "1.0",
+                    "status": "rejected",
+                    "committed": False,
+                    "reason": f"backend rejected {tool_name}",
+                    "operations": results,
+                    "artifacts": str(artifacts),
+                }
+        staged_content = board.get_as_string()
+        (artifacts / "staged.kicad_pcb").write_text(staged_content, encoding="utf-8")
+        diff_text = "".join(
+            difflib.unified_diff(
+                before_content.splitlines(keepends=True),
+                staged_content.splitlines(keepends=True),
+                fromfile="before.kicad_pcb",
+                tofile="staged.kicad_pcb",
+            )
+        )
+        (artifacts / "edit.diff").write_text(diff_text, encoding="utf-8")
+        staged_drc = board_drc_evidence(root, board_content=staged_content)
+        new_findings = sorted(set(staged_drc["finding_keys"]) - set(before_drc["finding_keys"]))
+        if new_findings:
+            board.drop_commit()
+            commit_active = False
+            return {
+                "schema_version": "1.0",
+                "status": "rejected",
+                "committed": False,
+                "reason": "staged board introduces new DRC findings",
+                "new_drc_findings": [json.loads(item) for item in new_findings],
+                "before_drc": before_drc,
+                "staged_drc": staged_drc,
+                "operations": results,
+                "artifacts": str(artifacts),
+                "diff": str(artifacts / "edit.diff"),
+            }
+        board.push_commit()
+        commit_active = False
+        try:
+            board.save()
+        except Exception:
+            board.revert()
+            raise
+        final_authority = authority_report(root)
+        if not final_authority["policy"]["board_mutation_allowed"]:
+            raise RuntimeError("saved board failed the live/disk semantic synchronization gate")
+        return {
+            "schema_version": "1.0",
+            "status": "pass",
+            "committed": True,
+            "operations": results,
+            "before_drc": before_drc,
+            "staged_drc": staged_drc,
+            "authority": final_authority,
+            "artifacts": str(artifacts),
+            "diff": str(artifacts / "edit.diff"),
+            "diff_lines": len(diff_text.splitlines()),
+        }
+    except Exception:
+        if commit_active:
+            with contextlib.suppress(Exception):
+                board.drop_commit()
+        raise
+
+
 def _rg_binary() -> str:
     binary = shutil.which("rg")
     if binary is None:
@@ -684,6 +793,7 @@ def build_parser() -> argparse.ArgumentParser:
     route.add_argument("--allow-critical", action="store_true")
     route.add_argument("--apply", action="store_true")
     route.add_argument("--yes", action="store_true", help="confirm route mutation")
+    route.add_argument("--artifacts", default="", metavar="DIR")
     route.add_argument("--format", choices=("json", "jsonl"), default="json")
 
     place = subcommands.add_parser(
@@ -710,6 +820,7 @@ def build_parser() -> argparse.ArgumentParser:
     place.add_argument("--seed", type=int, default=42)
     place.add_argument("--apply", action="store_true")
     place.add_argument("--yes", action="store_true", help="confirm placement mutation")
+    place.add_argument("--artifacts", default="", metavar="DIR")
     place.add_argument("--format", choices=("json", "jsonl"), default="json")
     return parser
 
@@ -885,12 +996,17 @@ def main(argv: Sequence[str] | None = None) -> None:
                 if plan["status"] != "planned":
                     reason = plan.get("reason", plan["status"])
                     raise ValueError(f"route cannot be applied: {reason}")
-                payload = asyncio.run(
-                    invoke_backend_tool(args, "pcb_add_tracks_bulk", {"tracks": plan["segments"]})
+                transaction = asyncio.run(
+                    run_native_board_transaction(
+                        args,
+                        [("pcb_add_tracks_bulk", {"tracks": plan["segments"]})],
+                        label=f"route-{args.net}",
+                    )
                 )
-                plan["apply_result"] = payload
-                if not payload["ok"]:
-                    raise RuntimeError("backend rejected route application")
+                plan["transaction"] = transaction
+                if transaction["status"] in {"rejected", "blocked"}:
+                    plan["status"] = transaction["status"]
+                    plan["reason"] = transaction["reason"]
             indent = 2 if args.format == "json" else None
             print(
                 json.dumps(
@@ -904,6 +1020,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 raise SystemExit(3)
             if plan["status"] == "blocked":
                 raise SystemExit(4)
+            if plan["status"] == "rejected":
+                raise SystemExit(3)
             return
         if args.command == "place":
             keepouts: list[list[float]] = []
@@ -929,14 +1047,13 @@ def main(argv: Sequence[str] | None = None) -> None:
                 if plan["status"] != "planned":
                     reason = plan.get("reason", plan["status"])
                     raise ValueError(f"placement cannot be applied: {reason}")
-                results = []
+                operations: list[tuple[str, dict[str, Any]]] = []
                 for placement in plan["placements"]:
                     if placement["fixed"] or placement["from"] == placement["to"]:
                         continue
                     x_mm, y_mm = placement["to"]
-                    result = asyncio.run(
-                        invoke_backend_tool(
-                            args,
+                    operations.append(
+                        (
                             "pcb_move_footprint",
                             {
                                 "reference": placement["reference"],
@@ -946,12 +1063,13 @@ def main(argv: Sequence[str] | None = None) -> None:
                             },
                         )
                     )
-                    results.append(result)
-                    if not result["ok"]:
-                        raise RuntimeError(
-                            f"backend rejected placement for {placement['reference']}"
-                        )
-                plan["apply_results"] = results
+                transaction = asyncio.run(
+                    run_native_board_transaction(args, operations, label="placement")
+                )
+                plan["transaction"] = transaction
+                if transaction["status"] in {"rejected", "blocked"}:
+                    plan["status"] = transaction["status"]
+                    plan["reason"] = transaction["reason"]
             indent = 2 if args.format == "json" else None
             print(
                 json.dumps(
@@ -963,6 +1081,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             )
             if plan["status"] == "blocked":
                 raise SystemExit(4)
+            if plan["status"] == "rejected":
+                raise SystemExit(3)
             return
     except BrokenPipeError:
         # A downstream command (commonly head/jq/rg) intentionally stopped
