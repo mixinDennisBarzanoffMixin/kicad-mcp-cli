@@ -103,6 +103,16 @@ class SchematicLayoutAutomationService:
             )
             return f"Could not load the active schematic for auto-placement: {exc}"
 
+        if sch_file.exists() and self.schematic_has_connections(
+            sch_file.read_text(encoding="utf-8", errors="ignore")
+        ):
+            return (
+                "Refused legacy symbol auto-placement because the schematic already "
+                "contains wires, labels, buses, or power connections. Moving symbols "
+                "without rerouting those attachments can silently change connectivity; "
+                "use the connectivity-preserving railway planner instead."
+            )
+
         sch_data = self.parse_schematic(sch_file)
         all_syms = sch_data["symbols"] + sch_data["power_symbols"]
 
@@ -316,6 +326,16 @@ class SchematicLayoutAutomationService:
             schematic = self.load_schematic(sch_file)
         except Exception as exc:
             return f"Could not load the active schematic for functional placement: {exc}"
+
+        if sch_file.exists() and self.schematic_has_connections(
+            sch_file.read_text(encoding="utf-8", errors="ignore")
+        ):
+            return (
+                "Refused legacy functional placement because the schematic already "
+                "contains wires, labels, buses, or power connections. Moving symbols "
+                "without rerouting those attachments can silently change connectivity; "
+                "use the connectivity-preserving railway planner instead."
+            )
 
         sch_data = self.parse_schematic(sch_file)
         all_syms = sch_data["symbols"] + sch_data["power_symbols"]

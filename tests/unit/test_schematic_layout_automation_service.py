@@ -230,6 +230,26 @@ def test_auto_place_symbols_reports_save_failure(tmp_path: Path) -> None:
     )
 
 
+def test_auto_place_symbols_refuses_connected_schematic(tmp_path: Path) -> None:
+    schematic_file = tmp_path / "board.kicad_sch"
+    schematic_file.write_text("(wire (pts (xy 1 1) (xy 2 1)))", encoding="utf-8")
+    component = FakeComponent()
+    loaded = FakeSchematic({"R1": component})
+    service = _service(
+        schematic_file,
+        loaded=loaded,
+        parsed={"symbols": [{"reference": "R1"}], "power_symbols": []},
+    )
+    object.__setattr__(service, "schematic_has_connections", lambda _text: True)
+
+    result = service.auto_place_symbols(["R1"])
+
+    assert result.startswith("Refused legacy symbol auto-placement")
+    assert "railway planner" in result
+    assert component.moves == []
+    assert loaded.saved == []
+
+
 def test_autoplace_fields_dry_run_executes_mutator_without_writing(tmp_path: Path) -> None:
     schematic_file = tmp_path / "board.kicad_sch"
     schematic_file.write_text("original", encoding="utf-8")
@@ -390,6 +410,26 @@ def test_auto_place_functional_reports_load_failure(tmp_path: Path) -> None:
     assert service.auto_place_functional() == (
         "Could not load the active schematic for functional placement: bad file"
     )
+
+
+def test_auto_place_functional_refuses_connected_schematic(tmp_path: Path) -> None:
+    schematic_file = tmp_path / "board.kicad_sch"
+    schematic_file.write_text('(label "NET" (at 1 1 0))', encoding="utf-8")
+    component = FakeComponent()
+    loaded = FakeSchematic({"R1": component})
+    service = _service(
+        schematic_file,
+        loaded=loaded,
+        parsed={"symbols": [{"reference": "R1"}], "power_symbols": []},
+    )
+    object.__setattr__(service, "schematic_has_connections", lambda _text: True)
+
+    result = service.auto_place_functional(["R1"])
+
+    assert result.startswith("Refused legacy functional placement")
+    assert "railway planner" in result
+    assert component.moves == []
+    assert loaded.saved == []
 
 
 def test_auto_place_functional_reports_overflow(tmp_path: Path) -> None:
