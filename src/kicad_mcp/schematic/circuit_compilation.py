@@ -173,7 +173,6 @@ class SchematicCircuitCompilationService:
     ) -> str:
         """Build and replace the active schematic from structured circuit inputs."""
         schematic_file = self.active_schematic_file()
-        removed_symbols, removed_labels, backup_path = self.snapshot_before_replace(schematic_file)
         start_paper = self.read_sheet_paper(schematic_file)
         prepared = self.prepare_inputs(
             symbols=symbols,
@@ -196,7 +195,6 @@ class SchematicCircuitCompilationService:
                     "unresolved_nets": prepared.unresolved_nets[:10],
                 }
             )
-        if prepared.nets and not prepared.generated_wires and not prepared.wires:
             examples = "; ".join(
                 (
                     f"{item['name']} "
@@ -206,13 +204,17 @@ class SchematicCircuitCompilationService:
                 for item in prepared.unresolved_nets[:5]
             )
             raise ValueError(
-                "Netlist-aware auto-layout could not generate any safe terminal stubs. "
-                "The provided nets did not resolve to collision-safe pin endpoints. "
+                "Netlist compilation aborted before writing because one or more endpoints "
+                "were unresolved or ambiguous. Partial schematic builds are not allowed. "
                 "Use `sch_analyze_net_compilation()` to inspect unresolved nets, or "
                 "provide explicit reference+pin endpoints / explicit wires. "
                 f"Examples: {examples or 'no endpoints were routable'}. "
                 f"Alias matches: {prepared.resolution_stats['pin_alias_resolutions']}."
             )
+
+        # Snapshot only after compilation has proved every requested endpoint.
+        # This keeps failed raw builds side-effect free as well as write-atomic.
+        removed_symbols, removed_labels, backup_path = self.snapshot_before_replace(schematic_file)
 
         paper_declaration = self.read_sheet_paper_declaration(schematic_file)
         if (
@@ -380,14 +382,6 @@ class SchematicCircuitCompilationService:
                 notes.append(
                     f"Generated {len(prepared.generated_wires)} collision-safe terminal "
                     "stub(s); nets connect by name."
-                )
-            if prepared.unresolved_nets:
-                names = ", ".join(str(item["name"]) for item in prepared.unresolved_nets[:8])
-                more = " …" if len(prepared.unresolved_nets) > 8 else ""
-                notes.append(
-                    f"WARNING: {len(prepared.unresolved_nets)} net(s) could not be "
-                    f"terminalized safely and were left unconnected: {names}{more}. "
-                    "Use sch_analyze_net_compilation() for per-endpoint details."
                 )
         if notes:
             return result + "\n" + "\n".join(notes)

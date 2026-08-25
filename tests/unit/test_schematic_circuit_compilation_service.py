@@ -307,7 +307,7 @@ def test_build_raises_when_no_net_endpoint_can_be_generated(tmp_path: Path) -> N
         chosen_paper="A4",
     )
 
-    with pytest.raises(ValueError, match="could not generate any safe terminal stubs") as exc:
+    with pytest.raises(ValueError, match="aborted before writing") as exc:
         harness.service().build(nets=[{"name": "BROKEN"}])
 
     assert "BROKEN (resolved 0/2, missing: U9.1, U10.2)" in str(exc.value)
@@ -515,7 +515,9 @@ def test_place_symbol_block_emits_extra_properties_and_skips_standard_fields() -
     assert block.count('(property "Datasheet"') == 1
 
 
-def test_build_reports_terminalized_and_partial_unresolved_notes(tmp_path: Path) -> None:
+def test_build_rejects_partial_unresolved_netlist_before_snapshot_or_write(
+    tmp_path: Path,
+) -> None:
     harness = CompilationHarness(tmp_path)
     harness.prepared = PreparedCircuitInputs(
         symbols=[],
@@ -541,12 +543,12 @@ def test_build_reports_terminalized_and_partial_unresolved_notes(tmp_path: Path)
         chosen_paper="A4",
     )
 
-    result = harness.service().build(nets=[{"name": "GOOD"}, {"name": "BROKEN"}])
+    with pytest.raises(ValueError, match="Partial schematic builds are not allowed"):
+        harness.service().build(nets=[{"name": "GOOD"}, {"name": "BROKEN"}])
 
-    assert "Generated 1 collision-safe terminal stub(s); nets connect by name." in result
-    assert "WARNING: 1 net(s) could not be terminalized safely" in result
-    assert "BROKEN" in result
     assert harness.warn_calls[0]["unresolved_net_count"] == 1
+    assert harness.snapshot_calls == []
+    assert harness.transaction_calls == []
 
 
 def test_build_reports_unsafe_routed_wire_note(tmp_path: Path) -> None:

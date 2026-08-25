@@ -1463,6 +1463,19 @@ def _endpoint_pin(endpoint: dict[str, Any]) -> str | None:
     return str(value) if value is not None else None
 
 
+def _endpoint_unit(endpoint: dict[str, Any]) -> int | None:
+    """Return an explicitly selected symbol unit, or ``None`` when absent/invalid."""
+
+    value = endpoint.get("unit", endpoint.get("symbol_unit"))
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        unit = int(value)
+    except (TypeError, ValueError):
+        return None
+    return unit if unit >= 1 else None
+
+
 def _endpoint_power(endpoint: dict[str, Any]) -> str | None:
     value = endpoint.get("power", endpoint.get("power_symbol", endpoint.get("rail")))
     if value is None and endpoint.get("type") == "power":
@@ -1642,23 +1655,40 @@ def _apply_netlist_auto_layout(
     laid_out_symbols = [dict(item) for item in symbols]
     laid_out_powers = [dict(item) for item in power_symbols]
     laid_out_labels = [dict(item) for item in labels]
-    refs = [str(symbol["reference"]) for symbol in laid_out_symbols if symbol.get("reference")]
-    ordered_refs = _order_refs_by_connectivity(refs, nets)
+    placement_keys = [
+        (str(symbol["reference"]), int(symbol.get("unit", 1) or 1))
+        for symbol in laid_out_symbols
+        if symbol.get("reference")
+    ]
+    if len(set(placement_keys)) != len(placement_keys):
+        raise ValueError("circuit symbols must have unique reference+unit placements")
+    component_refs = list(dict.fromkeys(reference for reference, _unit in placement_keys))
+    ordered_components = _order_refs_by_connectivity(component_refs, nets)
+    ordered_keys = [
+        key
+        for reference in ordered_components
+        for key in placement_keys
+        if key[0] == reference
+    ]
 
     cell_w = NETLIST_LAYOUT_COLUMN_SPACING_MM
     cell_h = NETLIST_LAYOUT_ROW_SPACING_MM
-    sym_by_ref = {str(s.get("reference", "")): s for s in laid_out_symbols if s.get("reference")}
+    sym_by_key = {
+        (str(symbol.get("reference", "")), int(symbol.get("unit", 1) or 1)): symbol
+        for symbol in laid_out_symbols
+        if symbol.get("reference")
+    }
 
     # Size-aware: each symbol reserves a grid block sized to its real pin extent
     # plus a margin for terminal stubs/labels, so a large multi-pin part (and its
     # label fan-out) cannot land on top of a neighbour. Footprints are computed
     # once and reused for sheet sizing and placement.
-    footprints: dict[str, tuple[int, int]] = {}
-    offsets: dict[str, tuple[float, float, float, float] | None] = {}
-    for reference, symbol in sym_by_ref.items():
+    footprints: dict[tuple[str, int], tuple[int, int]] = {}
+    offsets: dict[tuple[str, int], tuple[float, float, float, float] | None] = {}
+    for key, symbol in sym_by_key.items():
         extent = _symbol_local_extent(symbol)
-        offsets[reference] = extent
-        footprints[reference] = _symbol_footprint_cells(extent, cell_w, cell_h)
+        offsets[key] = extent
+        footprints[key] = _symbol_footprint_cells(extent, cell_w, cell_h)
 
     start_paper = paper if paper in _PAPER_LADDER else "A4"
     usable_cols = max(1, _sheet_usable_cols(start_paper, cell_w))
@@ -1682,30 +1712,31 @@ def _apply_netlist_auto_layout(
             row = int(round((sy - AUTO_LAYOUT_ORIGIN_Y_MM) / cell_h))
             netlist_occupied.add((col, row))
 
-    generated_positions: dict[str, tuple[float, float]] = {}
-    for reference in ordered_refs:
-        fcols, frows = footprints.get(reference, (1, 1))
+    generated_positions: dict[tuple[str, int], tuple[float, float]] = {}
+    for key in ordered_keys:
+        fcols, frows = footprints.get(key, (1, 1))
         col, row = _next_free_block(
             netlist_occupied, fcols, frows, cell_w=cell_w, cell_h=cell_h, paper=chosen_paper
         )
         cell_x = AUTO_LAYOUT_ORIGIN_X_MM + col * cell_w
         cell_y = AUTO_LAYOUT_ORIGIN_Y_MM + row * cell_h
-        extent = offsets.get(reference)
+        extent = offsets.get(key)
         if extent is not None:
             min_dx, min_dy, _, _ = extent
             # Seat the body inside the block with a half-margin gutter for labels.
             raw_x = cell_x - min_dx + _NETLIST_LABEL_MARGIN_W_MM / 2.0
             raw_y = cell_y - min_dy + _NETLIST_LABEL_MARGIN_H_MM / 2.0
-            generated_positions[reference] = _snap_point(raw_x, raw_y, True)
+            generated_positions[key] = _snap_point(raw_x, raw_y, True)
         else:
-            generated_positions[reference] = (cell_x, cell_y)
+            generated_positions[key] = (cell_x, cell_y)
 
-    symbol_positions: dict[str, tuple[float, float]] = {}
+    placement_positions: dict[tuple[str, int], tuple[float, float]] = {}
     for symbol in laid_out_symbols:
         reference = str(symbol.get("reference", ""))
+        key = (reference, int(symbol.get("unit", 1) or 1))
         if not _has_point(symbol):
-            if reference in generated_positions:
-                x, y = generated_positions[reference]
+            if key in generated_positions:
+                x, y = generated_positions[key]
             else:
                 x, y = _next_free_cell(
                     netlist_occupied,
@@ -1716,7 +1747,18 @@ def _apply_netlist_auto_layout(
             _set_point(symbol, x, y)
         point = (_coord_value(symbol, "x"), _coord_value(symbol, "y"))
         if point[0] is not None and point[1] is not None and reference:
-            symbol_positions[reference] = (point[0], point[1])
+            placement_positions[key] = (point[0], point[1])
+
+    symbol_positions = {
+        reference: (
+            sum(point[0] for key, point in placement_positions.items() if key[0] == reference)
+            / sum(1 for key in placement_positions if key[0] == reference),
+            sum(point[1] for key, point in placement_positions.items() if key[0] == reference)
+            / sum(1 for key in placement_positions if key[0] == reference),
+        )
+        for reference in component_refs
+        if any(key[0] == reference for key in placement_positions)
+    }
 
     known_refs = set(symbol_positions)
     for index, power_symbol in enumerate(laid_out_powers):
@@ -3793,38 +3835,155 @@ def _route_avoiding_obstacles(
     return direct, "WARNING: obstacle_bypass_failed"
 
 
+def _index_symbol_pin_geometry(
+    symbols: list[AddSymbolInput],
+    snap_to_grid: bool,
+) -> tuple[
+    dict[tuple[str, int], dict[str, tuple[float, float]]],
+    dict[tuple[str, int], dict[str, tuple[float, float]]],
+    dict[tuple[str, int], tuple[float, float]],
+]:
+    """Index placed symbol geometry by unit identity, not component reference alone."""
+
+    points: dict[tuple[str, int], dict[str, tuple[float, float]]] = {}
+    aliases: dict[tuple[str, int], dict[str, tuple[float, float]]] = {}
+    centers: dict[tuple[str, int], tuple[float, float]] = {}
+    for symbol in symbols:
+        key = (symbol.reference, symbol.unit)
+        if key in centers:
+            raise ValueError(
+                f"Duplicate symbol placement for reference '{symbol.reference}' unit "
+                f"{symbol.unit}; each reference+unit pair must be unique."
+            )
+        x, y = _snap_point(symbol.x_mm, symbol.y_mm, snap_to_grid and symbol.snap_to_grid)
+        centers[key] = (x, y)
+        points[key] = get_pin_positions(
+            symbol.library,
+            symbol.symbol_name,
+            x,
+            y,
+            symbol.rotation,
+            symbol.unit,
+        )
+        aliases[key] = get_pin_alias_positions(
+            symbol.library,
+            symbol.symbol_name,
+            x,
+            y,
+            symbol.rotation,
+            symbol.unit,
+        )
+    return points, aliases, centers
+
+
+def _resolved_endpoint_placement_key(
+    endpoint: dict[str, Any],
+    point: tuple[float, float],
+    symbol_points: dict[tuple[str, int], dict[str, tuple[float, float]]],
+    symbol_pin_aliases: dict[tuple[str, int], dict[str, tuple[float, float]]],
+) -> tuple[str, int] | None:
+    """Recover the unique unit key selected by endpoint resolution."""
+
+    reference = _endpoint_reference(endpoint)
+    if reference is None:
+        return None
+    unit = _endpoint_unit(endpoint)
+    if unit is not None:
+        return (reference, unit)
+    pin = _endpoint_pin(endpoint)
+    if pin is None:
+        return None
+    normalized = _normalize_pin_alias(pin)
+    matches: list[tuple[str, int]] = []
+    for key in sorted(symbol_points):
+        if key[0] != reference:
+            continue
+        aliases = symbol_pin_aliases.get(key, {})
+        candidates = [symbol_points[key].get(pin), aliases.get(pin)]
+        if normalized:
+            candidates.append(aliases.get(normalized))
+        if any(candidate == point for candidate in candidates if candidate is not None):
+            matches.append(key)
+    return matches[0] if len(matches) == 1 else None
+
+
 def _resolve_net_endpoint(
     endpoint: dict[str, Any],
     net_name: str,
-    symbol_points: dict[str, dict[str, tuple[float, float]]],
-    symbol_pin_aliases: dict[str, dict[str, tuple[float, float]]],
-    symbol_centers: dict[str, tuple[float, float]],
+    symbol_points: dict[tuple[str, int], dict[str, tuple[float, float]]],
+    symbol_pin_aliases: dict[tuple[str, int], dict[str, tuple[float, float]]],
+    symbol_centers: dict[tuple[str, int], tuple[float, float]],
     power_points: dict[str, tuple[float, float]],
     label_points: dict[str, tuple[float, float]],
 ) -> tuple[tuple[float, float] | None, str | None, str]:
     reference = _endpoint_reference(endpoint)
     if reference is not None:
         pin = _endpoint_pin(endpoint)
-        if reference not in symbol_centers:
+        has_explicit_unit = "unit" in endpoint or "symbol_unit" in endpoint
+        unit = _endpoint_unit(endpoint)
+        if has_explicit_unit and unit is None:
+            return None, f"symbol '{reference}' has an invalid unit selector", "invalid_unit"
+        reference_keys = sorted(key for key in symbol_centers if key[0] == reference)
+        if not reference_keys:
             return None, f"reference '{reference}' was not found", "missing_reference"
+        if unit is not None:
+            selected = (reference, unit)
+            if selected not in symbol_centers:
+                available = ", ".join(str(key[1]) for key in reference_keys)
+                return (
+                    None,
+                    f"unit {unit} was not found on symbol '{reference}'"
+                    + (f"; available units: {available}" if available else ""),
+                    "missing_unit",
+                )
+            reference_keys = [selected]
         if pin is not None:
-            if pin in symbol_points.get(reference, {}):
-                return symbol_points[reference][pin], None, "pin_number"
-            alias_positions = symbol_pin_aliases.get(reference, {})
-            if pin in alias_positions:
-                return alias_positions[pin], None, "pin_alias"
+            number_matches = [
+                (key, symbol_points[key][pin])
+                for key in reference_keys
+                if pin in symbol_points.get(key, {})
+            ]
+            if len(number_matches) == 1:
+                return number_matches[0][1], None, "pin_number"
+            if len(number_matches) > 1:
+                units = ", ".join(str(key[0][1]) for key in number_matches)
+                return (
+                    None,
+                    f"pin '{pin}' is ambiguous across units {units} of symbol '{reference}'; "
+                    "use an endpoint object with reference, unit, and pin",
+                    "ambiguous_unit",
+                )
             normalized_pin = _normalize_pin_alias(pin)
-            if normalized_pin and normalized_pin in alias_positions:
-                return alias_positions[normalized_pin], None, "pin_alias"
+            alias_matches: list[tuple[tuple[str, int], tuple[float, float]]] = []
+            for key in reference_keys:
+                aliases = symbol_pin_aliases.get(key, {})
+                if pin in aliases:
+                    alias_matches.append((key, aliases[pin]))
+                elif normalized_pin and normalized_pin in aliases:
+                    alias_matches.append((key, aliases[normalized_pin]))
+            if len(alias_matches) == 1:
+                return alias_matches[0][1], None, "pin_alias"
+            if len(alias_matches) > 1:
+                units = ", ".join(str(key[0][1]) for key in alias_matches)
+                return (
+                    None,
+                    f"pin alias '{pin}' is ambiguous across units {units} of symbol "
+                    f"'{reference}'; use an endpoint object with reference, unit, and pin",
+                    "ambiguous_unit",
+                )
             return (
                 None,
                 f"pin '{pin}' was not found on symbol '{reference}'",
                 "missing_pin",
             )
-        point = symbol_centers.get(reference)
-        if point is None:
-            return None, f"reference '{reference}' has no resolved placement", "missing_reference"
-        return point, None, "symbol_center"
+        if len(reference_keys) != 1:
+            units = ", ".join(str(key[1]) for key in reference_keys)
+            return (
+                None,
+                f"symbol '{reference}' has multiple placed units ({units}); select a unit",
+                "ambiguous_unit",
+            )
+        return symbol_centers[reference_keys[0]], None, "symbol_center"
 
     power = _endpoint_power(endpoint)
     if power is not None:
@@ -3877,7 +4036,9 @@ def _describe_net_endpoint(endpoint: dict[str, Any]) -> str:
     reference = _endpoint_reference(endpoint)
     if reference is not None:
         pin = _endpoint_pin(endpoint)
-        return f"{reference}.{pin}" if pin else reference
+        rendered = f"{reference}.{pin}" if pin else reference
+        unit = _endpoint_unit(endpoint)
+        return f"{rendered} (unit {unit})" if unit is not None else rendered
 
     power = _endpoint_power(endpoint)
     if power is not None:
@@ -4028,34 +4189,15 @@ def _plan_netlist_pin_terminals(
     conventional power symbols.  Same-named terminals connect by name rather than
     by accidental wire geometry.
     """
-    symbol_points: dict[str, dict[str, tuple[float, float]]] = {}
-    symbol_pin_aliases: dict[str, dict[str, tuple[float, float]]] = {}
-    symbol_centers: dict[str, tuple[float, float]] = {}
-    for symbol in symbols:
-        x, y = _snap_point(symbol.x_mm, symbol.y_mm, snap_to_grid and symbol.snap_to_grid)
-        symbol_centers[symbol.reference] = (x, y)
-        symbol_points[symbol.reference] = get_pin_positions(
-            symbol.library,
-            symbol.symbol_name,
-            x,
-            y,
-            symbol.rotation,
-            symbol.unit,
-        )
-        symbol_pin_aliases[symbol.reference] = get_pin_alias_positions(
-            symbol.library,
-            symbol.symbol_name,
-            x,
-            y,
-            symbol.rotation,
-            symbol.unit,
-        )
+    symbol_points, symbol_pin_aliases, symbol_centers = _index_symbol_pin_geometry(
+        symbols, snap_to_grid
+    )
 
     # Pin electrical types, keyed by number/name/case-fold, so a net's driver
     # status can be judged: KiCad's plain power symbols (power:+3V3, power:GND)
     # are power_in, so a rail with only power_in pins and no power_out source
     # needs a PWR_FLAG or ERC reports "input power pin not driven".
-    pin_etypes: dict[str, dict[str, str]] = {}
+    pin_etypes: dict[tuple[str, int], dict[str, str]] = {}
     for symbol in symbols:
         emap: dict[str, str] = {}
         for number, info in get_pin_metadata(
@@ -4066,7 +4208,7 @@ def _plan_netlist_pin_terminals(
             for key in (number, name, number.casefold(), name.casefold()):
                 if key:
                     emap.setdefault(key, etype)
-        pin_etypes[symbol.reference] = emap
+        pin_etypes[(symbol.reference, symbol.unit)] = emap
 
     power_points: dict[str, tuple[float, float]] = {}
     for power in powers:
@@ -4171,15 +4313,27 @@ def _plan_netlist_pin_terminals(
                 continue
             pin_points_seen[pin_key] = net_name
 
+            placement_key = _resolved_endpoint_placement_key(
+                endpoint, point, symbol_points, symbol_pin_aliases
+            )
+            if placement_key is None:
+                unresolved_endpoints.append(endpoint_text)
+                unresolved_details.append(
+                    f"{endpoint_text}: resolved pin did not identify exactly one placed unit"
+                )
+                resolution_stats["unresolved_endpoints"] += 1
+                continue
             pin_id = _endpoint_pin(endpoint)
-            etype = pin_etypes.get(reference, {}).get(pin_id, "") if pin_id else ""
+            etype = pin_etypes.get(placement_key, {}).get(pin_id, "") if pin_id else ""
             if etype == "power_out":
                 net_has_power_out[net_name] = True
             elif etype == "power_in":
                 net_needs_driver.setdefault(net_name, True)
 
-            all_points = symbol_points.get(reference, {}).values()
-            ux, uy = _pin_label_stub_direction(point, symbol_centers[reference], all_points)
+            all_points = symbol_points.get(placement_key, {}).values()
+            ux, uy = _pin_label_stub_direction(
+                point, symbol_centers[placement_key], all_points
+            )
             stub = _terminal_stub_length(net_name)
             ex = round(point[0] + ux * stub, 4)
             ey = round(point[1] + uy * stub, 4)
@@ -4300,28 +4454,9 @@ def _plan_netlist_wires(
     nets: list[dict[str, Any]],
     snap_to_grid: bool,
 ) -> tuple[list[dict[str, float | bool]], list[dict[str, Any]], dict[str, int]]:
-    symbol_points: dict[str, dict[str, tuple[float, float]]] = {}
-    symbol_pin_aliases: dict[str, dict[str, tuple[float, float]]] = {}
-    symbol_centers: dict[str, tuple[float, float]] = {}
-    for symbol in symbols:
-        x, y = _snap_point(symbol.x_mm, symbol.y_mm, snap_to_grid and symbol.snap_to_grid)
-        symbol_centers[symbol.reference] = (x, y)
-        symbol_points[symbol.reference] = get_pin_positions(
-            symbol.library,
-            symbol.symbol_name,
-            x,
-            y,
-            symbol.rotation,
-            symbol.unit,
-        )
-        symbol_pin_aliases[symbol.reference] = get_pin_alias_positions(
-            symbol.library,
-            symbol.symbol_name,
-            x,
-            y,
-            symbol.rotation,
-            symbol.unit,
-        )
+    symbol_points, symbol_pin_aliases, symbol_centers = _index_symbol_pin_geometry(
+        symbols, snap_to_grid
+    )
 
     power_points: dict[str, tuple[float, float]] = {}
     for power in powers:
@@ -4415,28 +4550,9 @@ def _resolve_intentional_no_connects(
     placing an NC marker at a symbol origin would make ERC evidence meaningless.
     """
 
-    symbol_points: dict[str, dict[str, tuple[float, float]]] = {}
-    symbol_pin_aliases: dict[str, dict[str, tuple[float, float]]] = {}
-    symbol_centers: dict[str, tuple[float, float]] = {}
-    for symbol in symbols:
-        x, y = _snap_point(symbol.x_mm, symbol.y_mm, snap_to_grid and symbol.snap_to_grid)
-        symbol_centers[symbol.reference] = (x, y)
-        symbol_points[symbol.reference] = get_pin_positions(
-            symbol.library,
-            symbol.symbol_name,
-            x,
-            y,
-            symbol.rotation,
-            symbol.unit,
-        )
-        symbol_pin_aliases[symbol.reference] = get_pin_alias_positions(
-            symbol.library,
-            symbol.symbol_name,
-            x,
-            y,
-            symbol.rotation,
-            symbol.unit,
-        )
+    symbol_points, symbol_pin_aliases, symbol_centers = _index_symbol_pin_geometry(
+        symbols, snap_to_grid
+    )
 
     connected_points: dict[tuple[float, float], str] = {}
     for net in nets:
@@ -4556,7 +4672,28 @@ def _prepare_build_circuit_inputs(
     validated_powers = [PowerSymbolInput.model_validate(item) for item in raw_powers]
     validated_wires = [AddWireInput.model_validate(item) for item in raw_wires]
     validated_labels = [AddLabelInput.model_validate(item) for item in raw_labels]
+    placement_identities: set[tuple[str, int]] = set()
+    component_definitions: dict[str, tuple[str, str, str, str]] = {}
     for symbol in validated_symbols:
+        identity = (symbol.reference, symbol.unit)
+        if identity in placement_identities:
+            raise ValueError(
+                f"Duplicate symbol placement for reference '{symbol.reference}' unit "
+                f"{symbol.unit}; each reference+unit pair must be unique."
+            )
+        placement_identities.add(identity)
+        definition = (
+            symbol.library,
+            symbol.symbol_name,
+            symbol.value,
+            symbol.footprint,
+        )
+        prior_definition = component_definitions.setdefault(symbol.reference, definition)
+        if prior_definition != definition:
+            raise ValueError(
+                f"Multi-unit reference '{symbol.reference}' must use one consistent "
+                "library symbol, value, and footprint across all units."
+            )
         _validate_symbol_resolves(symbol.library, symbol.symbol_name)
         available_units = get_symbol_available_units(symbol.library, symbol.symbol_name)
         if available_units and symbol.unit not in available_units:

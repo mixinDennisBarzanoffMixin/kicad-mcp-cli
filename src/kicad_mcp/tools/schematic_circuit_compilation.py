@@ -84,9 +84,14 @@ def register(
         uses the **collision-safe** strategy: each pin endpoint gets a short stub plus
         a same-named terminal (a global label for signal nets, a power symbol for
         power nets), so nets connect *by name* and can never short by crossing wire
-        geometry.  Nets that cannot resolve to a routable pin endpoint raise a clear
-        error (or are surfaced as warnings) instead of silently producing a
-        disconnected schematic.
+        geometry. Nets that cannot resolve every requested pin endpoint raise a
+        clear error before the schematic is snapshotted or written; partial
+        compilation is never emitted.
+
+        A pin endpoint may be a compatible ``"REF.PIN"`` string. For multi-unit
+        components, strings are accepted only when the pin identifies exactly one
+        placed unit. The authoritative form is
+        ``{"reference": "U2", "unit": 3, "pin": "100"}``.
 
         Each net may set an optional ``scope`` to control the emitted terminal
         label kind: ``"global"`` (default when omitted, connects across the whole

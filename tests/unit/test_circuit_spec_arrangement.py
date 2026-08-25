@@ -157,3 +157,48 @@ def test_invalid_endpoint_fails_before_generating_coordinates() -> None:
 
     with pytest.raises(ValueError, match="REF.PIN"):
         arrange_circuit_spec(spec)
+
+
+def test_arrangement_uses_reference_and_unit_as_placement_identity() -> None:
+    spec = {
+        "symbols": [
+            {
+                "library": "Device",
+                "symbol_name": "R",
+                "reference": "U2",
+                "value": "multi",
+                "unit": 1,
+            },
+            {
+                "library": "Device",
+                "symbol_name": "R",
+                "reference": "U2",
+                "value": "multi",
+                "unit": 2,
+            },
+        ],
+        "nets": [
+            {
+                "name": "BETWEEN_UNITS",
+                "endpoints": [
+                    {"reference": "U2", "unit": 1, "pin": "1"},
+                    {"reference": "U2", "unit": 2, "pin": "2"},
+                ],
+            }
+        ],
+        "auto_layout": True,
+        "max_paper": "A4",
+    }
+
+    result = arrange_circuit_spec(spec)
+    arranged = result["arranged_spec"]["symbols"]
+    assert [(item["reference"], item["unit"]) for item in arranged] == [
+        ("U2", 1),
+        ("U2", 2),
+    ]
+    assert len({(item["x_mm"], item["y_mm"]) for item in arranged}) == 2
+    placements = result["layout"]["placements"]
+    assert {(item["reference"], item["unit"]) for item in placements} == {
+        ("U2", 1),
+        ("U2", 2),
+    }

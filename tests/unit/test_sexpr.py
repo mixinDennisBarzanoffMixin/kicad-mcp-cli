@@ -230,6 +230,24 @@ def test_schematic_netlist_helpers_layout_missing_terminals() -> None:
     assert laid_labels[0]["name"] == "OUT"
     assert _has_point(laid_labels[0])
     assert netlist_paper == "A4"  # a 2-symbol circuit fits the default sheet
+    multi_symbols, _multi_powers, _multi_labels, _multi_paper = _apply_netlist_auto_layout(
+        [
+            {"reference": "U2", "unit": 1},
+            {"reference": "U2", "unit": 2},
+        ],
+        [],
+        [],
+        [
+            {
+                "name": "BETWEEN_UNITS",
+                "endpoints": [
+                    {"reference": "U2", "unit": 1, "pin": "1"},
+                    {"reference": "U2", "unit": 2, "pin": "2"},
+                ],
+            }
+        ],
+    )
+    assert len({(symbol["x_mm"], symbol["y_mm"]) for symbol in multi_symbols}) == 2
     basic_symbols, basic_powers, basic_labels, basic_paper = _apply_basic_auto_layout(
         [{"reference": "R1"}],
         [{"name": "GND"}, {"name": "+5V"}],
@@ -286,9 +304,9 @@ def test_schematic_routing_endpoint_helpers_cover_fallbacks() -> None:
     assert warning is None
     assert direct == [(0.0, 0.0, 0.0, 10.0)]
 
-    symbol_points = {"U1": {"1": (1.0, 1.0), "vcc": (2.0, 2.0)}}
-    aliases = {"U1": {"VCC": (2.0, 2.0), "vcc": (2.0, 2.0)}}
-    centers = {"U1": (5.0, 5.0)}
+    symbol_points = {("U1", 1): {"1": (1.0, 1.0), "vcc": (2.0, 2.0)}}
+    aliases = {("U1", 1): {"VCC": (2.0, 2.0), "vcc": (2.0, 2.0)}}
+    centers = {("U1", 1): (5.0, 5.0)}
     powers = {"GND": (0.0, 10.0)}
     labels = {"OUT": (20.0, 10.0)}
     assert _resolve_net_endpoint(

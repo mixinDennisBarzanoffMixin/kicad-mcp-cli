@@ -603,12 +603,11 @@ async def test_analyze_net_compilation_reports_unresolved_endpoints(
 
 
 @pytest.mark.anyio
-async def test_build_circuit_surfaces_partial_unresolved_nets(
+async def test_build_circuit_rejects_partial_unresolved_nets(
     sample_project,
     mock_kicad,
 ) -> None:
-    """A partially-unroutable netlist must surface the dropped nets in the result, not
-    only in the server log (work order P2-T4): no connection vanishes silently."""
+    """A partially-unroutable netlist must fail without replacing the schematic."""
     server = build_server("schematic")
 
     result = await call_tool_text(
@@ -651,8 +650,8 @@ async def test_build_circuit_surfaces_partial_unresolved_nets(
         },
     )
 
-    assert "could not be terminalized safely" in result
-    assert "1 net(s)" in result
+    assert "aborted before writing" in result
+    assert "Partial schematic builds are not allowed" in result
     assert "BROKEN_NET" in result
 
 
@@ -689,7 +688,7 @@ async def test_build_circuit_netlist_auto_layout_raises_when_no_wires_resolve(
         },
     )
 
-    assert "could not generate any safe terminal stubs" in error_text
+    assert "aborted before writing" in error_text
     assert "BROKEN_NET" in error_text
     assert "U9.1" in error_text
     assert "U10.2" in error_text

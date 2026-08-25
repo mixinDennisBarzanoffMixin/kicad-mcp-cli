@@ -81,6 +81,17 @@ def test_build_circuit_default_keeps_routed_wires_opt_in() -> None:
     assert kwdefaults.get("unsafe_routed_wires") is False
 
 
+def test_duplicate_reference_unit_placement_is_rejected(
+    planner_spies: list[str],
+) -> None:
+    duplicate = [dict(_SYMBOLS[0]), dict(_SYMBOLS[0])]
+
+    with pytest.raises(ValueError, match=r"reference 'R1' unit 1"):
+        sch._prepare_build_circuit_inputs(symbols=duplicate)
+
+    assert planner_spies == []
+
+
 def test_facing_pin_rows_fall_back_to_labels_directly_on_pins(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -149,6 +160,132 @@ def test_facing_pin_rows_fall_back_to_labels_directly_on_pins(
     ]
 
 
+def test_multi_unit_reference_keeps_each_units_geometry_and_wires_all_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for A7670E U2A/U2B/U2C/U2D reference collapse."""
+
+    pin_by_unit = {1: "1", 2: "11", 3: "100", 4: "2"}
+    symbols = [
+        AddSymbolInput(
+            library="Flux_A7670E",
+            symbol_name="A7670E-LASE",
+            reference="U2",
+            value="A7670E-LASE",
+            unit=unit,
+            x_mm=40.0 * unit,
+            y_mm=50.0,
+        )
+        for unit in range(1, 5)
+    ]
+
+    def pin_positions(
+        _library: str,
+        _symbol: str,
+        x_mm: float,
+        y_mm: float,
+        _rotation: int,
+        unit: int,
+    ) -> dict[str, tuple[float, float]]:
+        return {pin_by_unit[unit]: (x_mm + 5.0, y_mm)}
+
+    monkeypatch.setattr(sch, "get_pin_positions", pin_positions)
+    monkeypatch.setattr(sch, "get_pin_alias_positions", pin_positions)
+    monkeypatch.setattr(
+        sch,
+        "get_pin_metadata",
+        lambda _library, _symbol, unit: {
+            pin_by_unit[unit]: {"name": f"UNIT_{unit}", "etype": "passive"}
+        },
+    )
+
+    nets = [
+        {"name": "UNIT1_TEST", "scope": "local", "endpoints": ["U2.1"]},
+        {
+            "name": "UNIT2_TEST",
+            "scope": "local",
+            "endpoints": [{"reference": "U2", "unit": 2, "pin": "11"}],
+        },
+        {"name": "UNIT3_TEST", "scope": "local", "endpoints": ["U2.100"]},
+        {
+            "name": "UNIT4_TEST",
+            "scope": "local",
+            "endpoints": [{"reference": "U2", "unit": 4, "pin": "2"}],
+        },
+    ]
+
+    _wires, _powers, labels, unresolved, stats = sch._plan_netlist_pin_terminals(
+        symbols, [], [], nets, False
+    )
+
+    assert unresolved == []
+    assert stats["resolved_endpoints"] == 4
+    assert {label["name"] for label in labels} == {
+        "UNIT1_TEST",
+        "UNIT2_TEST",
+        "UNIT3_TEST",
+        "UNIT4_TEST",
+    }
+    assert {label["x_mm"] for label in labels} == {52.62, 92.62, 132.62, 172.62}
+
+
+def test_multi_unit_string_endpoint_must_be_unambiguous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    symbols = [
+        AddSymbolInput(
+            library="Test",
+            symbol_name="RepeatedPin",
+            reference="U2",
+            value="RepeatedPin",
+            unit=unit,
+            x_mm=40.0 * unit,
+            y_mm=50.0,
+        )
+        for unit in (1, 2)
+    ]
+    monkeypatch.setattr(
+        sch,
+        "get_pin_positions",
+        lambda _library, _symbol, x, y, _rotation, _unit: {"1": (x + 5.0, y)},
+    )
+    monkeypatch.setattr(
+        sch,
+        "get_pin_alias_positions",
+        lambda _library, _symbol, x, y, _rotation, _unit: {"1": (x + 5.0, y)},
+    )
+    monkeypatch.setattr(
+        sch,
+        "get_pin_metadata",
+        lambda *_args: {"1": {"name": "IO", "etype": "passive"}},
+    )
+
+    _wires, _powers, _labels, unresolved, _stats = sch._plan_netlist_pin_terminals(
+        symbols,
+        [],
+        [],
+        [{"name": "AMBIGUOUS", "endpoints": ["U2.1"]}],
+        False,
+    )
+    assert "ambiguous across units 1, 2" in unresolved[0]["unresolved_details"][0]
+
+    _wires, _powers, labels, unresolved, _stats = sch._plan_netlist_pin_terminals(
+        symbols,
+        [],
+        [],
+        [
+            {
+                "name": "EXACT",
+                "scope": "local",
+                "endpoints": [{"reference": "U2", "unit": 1, "pin": "1"}],
+            }
+        ],
+        False,
+    )
+    assert unresolved == []
+    assert labels[0]["x_mm"] == 50.08
+
+
 def test_intentional_no_connects_resolve_exact_pins_and_reject_wired_pins(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -167,9 +304,7 @@ def test_intentional_no_connects_resolve_exact_pins_and_reject_wired_pins(
         lambda *_args: {"9": (55.0, 50.0), "NC": (55.0, 50.0)},
     )
 
-    assert sch._resolve_intentional_no_connects([symbol], [], ["U1.NC"], True) == [
-        (55.0, 50.0)
-    ]
+    assert sch._resolve_intentional_no_connects([symbol], [], ["U1.NC"], True) == [(55.0, 50.0)]
 
     with pytest.raises(ValueError, match="already assigned to net 'SIGNAL'"):
         sch._resolve_intentional_no_connects(

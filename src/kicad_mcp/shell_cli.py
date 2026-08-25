@@ -1421,6 +1421,9 @@ def main(argv: Sequence[str] | None = None) -> None:
                 print(format_schematic_graph_placement(report))
             return
         if args.command == "arrange-spec":
+            # Arrangement resolves project-local symbol libraries to infer
+            # multi-unit pin ownership before planning placement identities.
+            _apply_runtime_options(args)
             if args.path == "-":
                 source = "stdin"
                 spec = _parse_json_object(sys.stdin.read(), source=source)

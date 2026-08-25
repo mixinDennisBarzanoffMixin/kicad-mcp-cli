@@ -111,9 +111,13 @@ def test_registration_preserves_names_descriptions_and_schemas() -> None:
         "uses the **collision-safe** strategy: each pin endpoint gets a short stub plus\n"
         "a same-named terminal (a global label for signal nets, a power symbol for\n"
         "power nets), so nets connect *by name* and can never short by crossing wire\n"
-        "geometry.  Nets that cannot resolve to a routable pin endpoint raise a clear\n"
-        "error (or are surfaced as warnings) instead of silently producing a\n"
-        "disconnected schematic.\n\n"
+        "geometry. Nets that cannot resolve every requested pin endpoint raise a\n"
+        "clear error before the schematic is snapshotted or written; partial\n"
+        "compilation is never emitted.\n\n"
+        "A pin endpoint may be a compatible ``\"REF.PIN\"`` string. For multi-unit\n"
+        "components, strings are accepted only when the pin identifies exactly one\n"
+        "placed unit. The authoritative form is\n"
+        '``{"reference": "U2", "unit": 3, "pin": "100"}``.\n\n'
         "Each net may set an optional ``scope`` to control the emitted terminal\n"
         'label kind: ``"global"`` (default when omitted, connects across the whole\n'
         'design), ``"local"`` (sheet-local label), or ``"hierarchical"`` (with an\n'
