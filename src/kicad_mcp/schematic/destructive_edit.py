@@ -26,6 +26,7 @@ type SnapPoint = Callable[[float, float, bool], tuple[float, float]]
 type SnapNotice = Callable[[tuple[float, ...], tuple[float, ...]], str]
 type NormalizeLabelJustify = Callable[[str | None], str | None]
 type SetLabelJustify = Callable[[str, str], str]
+type ResolveSchematicFile = Callable[[str | None, str | None], Path]
 
 
 class TransactionalWrite(Protocol):
@@ -33,6 +34,18 @@ class TransactionalWrite(Protocol):
 
     def __call__(
         self,
+        mutator: Callable[[str], str],
+        *,
+        allow_node_loss: bool = False,
+    ) -> str: ...
+
+
+class TransactionalWriteToFile(Protocol):
+    """Transaction boundary for an explicitly resolved child schematic."""
+
+    def __call__(
+        self,
+        path: Path,
         mutator: Callable[[str], str],
         *,
         allow_node_loss: bool = False,
@@ -63,6 +76,8 @@ class SchematicDestructiveEditService:
     snap_notice: SnapNotice
     normalize_label_justify: NormalizeLabelJustify
     set_label_justify: SetLabelJustify
+    resolve_schematic_file: ResolveSchematicFile | None = None
+    transactional_write_to_file: TransactionalWriteToFile | None = None
 
     def delete_wire(self, wire_id: str) -> str:
         """Delete one wire selected by UUID or unique UUID prefix."""
@@ -131,10 +146,21 @@ class SchematicDestructiveEditService:
             f"({self.format_mm(float(target['x2']))}, {self.format_mm(float(target['y2']))})."
         )
 
-    def delete_symbol(self, reference: str) -> str:
-        """Delete placed symbol blocks and directly attached wires."""
+    def delete_symbol(
+        self,
+        reference: str,
+        sheet: str | None = None,
+        sheet_file: str | None = None,
+    ) -> str:
+        """Delete placed symbol blocks and attached wires from root or child."""
         removed_wire_count = 0
         removed_symbol_count = 0
+        target = self.active_schematic_file()
+        targeted_child = bool(sheet or sheet_file)
+        if targeted_child:
+            if self.resolve_schematic_file is None or self.transactional_write_to_file is None:
+                raise ValueError("Child-sheet deletion is not configured for this backend.")
+            target = self.resolve_schematic_file(sheet, sheet_file)
 
         def mutator(current: str) -> str:
             nonlocal removed_symbol_count, removed_wire_count
@@ -178,15 +204,26 @@ class SchematicDestructiveEditService:
             return "".join(pieces)
 
         try:
-            self.transactional_write(mutator, allow_node_loss=True)
+            if targeted_child and self.transactional_write_to_file is not None:
+                self.transactional_write_to_file(target, mutator, allow_node_loss=True)
+            else:
+                self.transactional_write(mutator, allow_node_loss=True)
         except ValueError as exc:
             return str(exc)
 
-        return (
-            f"{self.reload_schematic()}\n"
+        reload_notice = (
+            "Child schematic updated; reload it in KiCad if open."
+            if targeted_child
+            else self.reload_schematic()
+        )
+        result = (
+            f"{reload_notice}\n"
             f"Deleted {removed_symbol_count} symbol block(s) for '{reference}' "
             f"and {removed_wire_count} directly connected wire(s)."
         )
+        if targeted_child:
+            result += f"\nTarget schematic: {target}"
+        return result
 
     def delete_label(self, name: str, x_mm: float, y_mm: float) -> str:
         """Delete matching label blocks at raw or grid-snapped coordinates."""

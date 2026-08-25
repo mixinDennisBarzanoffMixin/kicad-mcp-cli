@@ -113,6 +113,7 @@ type TransactionalWrite = Callable[[Callable[[str], str], Path], str]
 type ReloadSchematic = Callable[[], str]
 type NewUuid = Callable[[], str]
 type FormatMm = Callable[[float], str]
+type ExtractBlock = Callable[[str, int], tuple[str, int]]
 
 
 @dataclass(frozen=True)
@@ -141,6 +142,7 @@ class SchematicBasicAuthoringService:
     reload_schematic: ReloadSchematic
     new_uuid: NewUuid
     format_mm: FormatMm
+    extract_block: ExtractBlock | None = None
 
     @staticmethod
     def _format_target_detail(target: SchematicTarget) -> str:
@@ -230,6 +232,45 @@ class SchematicBasicAuthoringService:
                 footprint_warning,
             )
             if part
+        )
+
+    def refresh_symbol_from_library(
+        self,
+        library: str,
+        symbol_name: str,
+        sheet: str | None,
+        sheet_file: str | None,
+    ) -> str:
+        """Replace one cached lib-symbol definition without moving its instances."""
+        extractor = self.extract_block
+        if extractor is None:
+            raise ValueError("Cached-symbol refresh is not configured for this backend.")
+        lib_id = f"{library}:{symbol_name}"
+        replacement = self.load_lib_symbol(library, symbol_name)
+        if replacement is None:
+            return f"Symbol '{lib_id}' was not found in the configured libraries."
+        target = self.resolve_target(sheet=sheet, sheet_file=sheet_file)
+
+        def mutator(current: str) -> str:
+            marker = f'(symbol "{lib_id}"'
+            start = current.find(marker)
+            if start < 0:
+                raise ValueError(f"Cached symbol '{lib_id}' was not found in {target.path.name}.")
+            _block, length = extractor(current, start)
+            return f"{current[:start]}{replacement}{current[start + length :]}"
+
+        self.transactional_write(mutator, target.path)
+        reload_notice = (
+            self.reload_schematic()
+            if target.is_root
+            else ("Child schematic updated; reload it in KiCad if open.")
+        )
+        return "\n".join(
+            (
+                reload_notice,
+                self._format_target_detail(target),
+                f"Refreshed cached symbol '{lib_id}' from its configured library.",
+            )
         )
 
     def add_wire(

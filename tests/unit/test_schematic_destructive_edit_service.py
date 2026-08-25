@@ -46,6 +46,7 @@ def _service(
     snap_result: tuple[float, float] | None = None,
     snap_message: str = "",
     justify_calls: list[tuple[str, str]] | None = None,
+    child_transaction: Callable[..., str] | None = None,
 ) -> tuple[SchematicDestructiveEditService, _TransactionRecorder]:
     tx = transaction or _TransactionRecorder(current)
     justify_records = justify_calls if justify_calls is not None else []
@@ -111,9 +112,39 @@ def _service(
             snap_notice=lambda _original, _snapped: snap_message,
             normalize_label_justify=normalize_justify,
             set_label_justify=set_justify,
+            resolve_schematic_file=lambda _sheet, sheet_file: Path(sheet_file or "child.kicad_sch"),
+            transactional_write_to_file=child_transaction,
         ),
         tx,
     )
+
+
+def test_delete_symbol_can_target_child_sheet() -> None:
+    current = "aa(symbol-u5)bb"
+    writes: list[tuple[Path, bool]] = []
+
+    def child_write(
+        path: Path,
+        mutator: Callable[[str], str],
+        *,
+        allow_node_loss: bool = False,
+    ) -> str:
+        writes.append((path, allow_node_loss))
+        return mutator(current)
+
+    service, root_transaction = _service(
+        current=current,
+        symbol_matches={"U5": [("(symbol-u5)", 2, 13, {"points": set()})]},
+        symbol_blocks={"(symbol-u5)": {"reference": "U5"}},
+        child_transaction=child_write,
+    )
+
+    result = service.delete_symbol("U5", sheet_file="02_System_3V3_Power.kicad_sch")
+
+    assert "Child schematic updated" in result
+    assert "Target schematic: 02_System_3V3_Power.kicad_sch" in result
+    assert writes == [(Path("02_System_3V3_Power.kicad_sch"), True)]
+    assert root_transaction.calls == []
 
 
 def test_delete_wire_preserves_prefix_matching_and_destructive_transaction() -> None:

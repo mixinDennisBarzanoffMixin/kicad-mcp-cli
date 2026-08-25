@@ -42,6 +42,7 @@ def _service(
     reload: _ReloadRecorder | None = None,
     uuid_values: list[str] | None = None,
     captured_symbol_blocks: list[dict[str, Any]] | None = None,
+    extract_block: Callable[[str, int], tuple[str, int]] | None = None,
 ) -> tuple[
     SchematicBasicAuthoringService,
     _TransactionRecorder,
@@ -127,8 +128,70 @@ def _service(
         reload_schematic=reloader,
         new_uuid=lambda: next(uuids),
         format_mm=lambda value: f"{value:g}",
+        extract_block=extract_block,
     )
     return service, tx, reloader, symbol_calls
+
+
+def _extract_parenthesized_block(content: str, start: int) -> tuple[str, int]:
+    depth = 0
+    for index in range(start, len(content)):
+        if content[index] == "(":
+            depth += 1
+        elif content[index] == ")":
+            depth -= 1
+            if depth == 0:
+                length = index - start + 1
+                return content[start : start + length], length
+    raise ValueError("unterminated block")
+
+
+def test_refresh_symbol_from_library_replaces_only_cached_definition() -> None:
+    current = (
+        '(lib_symbols\n  (symbol "Device:R" (pin passive line))\n)\n'
+        '(symbol (lib_id "Device:R") (property "Reference" "R1"))\n'
+        "(sheet_instances)"
+    )
+    transaction = _TransactionRecorder(current)
+    service, _, reload, _ = _service(
+        lib_definition='(symbol "Device:R" (pin passive clock))',
+        transaction=transaction,
+        extract_block=_extract_parenthesized_block,
+    )
+
+    result = service.refresh_symbol_from_library(
+        library="Device",
+        symbol_name="R",
+        sheet=None,
+        sheet_file=None,
+    )
+
+    assert transaction.updated is not None
+    assert '(symbol "Device:R" (pin passive clock))' in transaction.updated
+    assert '(symbol "Device:R" (pin passive line))' not in transaction.updated
+    assert '(symbol (lib_id "Device:R") (property "Reference" "R1"))' in (transaction.updated)
+    assert reload.calls == 1
+    assert "Refreshed cached symbol 'Device:R'" in result
+
+
+def test_refresh_symbol_from_library_updates_child_without_root_reload() -> None:
+    transaction = _TransactionRecorder('(symbol "Device:R" (pin passive line))')
+    service, _, reload, _ = _service(
+        lib_definition='(symbol "Device:R" (pin passive clock))',
+        transaction=transaction,
+        extract_block=_extract_parenthesized_block,
+    )
+
+    result = service.refresh_symbol_from_library(
+        library="Device",
+        symbol_name="R",
+        sheet=None,
+        sheet_file="power.kicad_sch",
+    )
+
+    assert transaction.calls[0][0] == Path("power.kicad_sch")
+    assert reload.calls == 0
+    assert "Child schematic updated" in result
 
 
 def test_add_symbol_preserves_target_write_warnings_and_result_order() -> None:

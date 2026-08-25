@@ -167,6 +167,27 @@ def register(mcp: FastMCP, dependencies: SchematicBasicAuthoringDependencies) ->
         )
 
     @mcp.tool()
+    @headless_compatible
+    def sch_refresh_symbol_from_library(
+        library: str,
+        symbol_name: str,
+        sheet: str | None = None,
+        sheet_file: str | None = None,
+    ) -> str:
+        """Refresh a sheet's cached symbol definition without moving instances.
+
+        KiCad schematics embed library symbols. Use this after a project-local
+        symbol contract changes so existing placed instances pick up corrected
+        pins, properties, and graphics.
+        """
+        return service.refresh_symbol_from_library(
+            library,
+            symbol_name,
+            sheet,
+            sheet_file,
+        )
+
+    @mcp.tool()
     def sch_add_wire(
         x1_mm: float,
         y1_mm: float,

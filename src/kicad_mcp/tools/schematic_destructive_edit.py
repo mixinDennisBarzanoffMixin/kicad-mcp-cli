@@ -28,10 +28,14 @@ def register(mcp: FastMCP, dependencies: SchematicDestructiveEditDependencies) -
         return service.delete_wire(payload.wire_id)
 
     @mcp.tool()
-    def sch_delete_symbol(reference: str) -> str:
-        """Remove a placed symbol and any directly attached wire segments."""
+    def sch_delete_symbol(
+        reference: str,
+        sheet: str | None = None,
+        sheet_file: str | None = None,
+    ) -> str:
+        """Remove a symbol and attached wires from the root or selected child sheet."""
         payload = DeleteSymbolInput(reference=reference)
-        return service.delete_symbol(payload.reference)
+        return service.delete_symbol(payload.reference, sheet=sheet, sheet_file=sheet_file)
 
     @mcp.tool()
     def sch_delete_label(name: str, x_mm: float, y_mm: float) -> str:

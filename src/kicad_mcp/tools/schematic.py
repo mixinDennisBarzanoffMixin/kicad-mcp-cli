@@ -6017,6 +6017,13 @@ def _register_authoring(mcp: FastMCP) -> None:
         snap_notice=_snap_notice,
         normalize_label_justify=_normalize_label_justify,
         set_label_justify=_set_label_justify,
+        resolve_schematic_file=lambda sheet, sheet_file: (
+            _resolve_schematic_target(
+                sheet=sheet,
+                sheet_file=sheet_file,
+            ).path
+        ),
+        transactional_write_to_file=_transactional_write_to_schematic_file,
     )
     schematic_destructive_edit.register(
         mcp,
@@ -6048,6 +6055,7 @@ def _register_authoring(mcp: FastMCP) -> None:
         reload_schematic=_reload_schematic,
         new_uuid=new_uuid,
         format_mm=_fmt_mm,
+        extract_block=_extract_block,
     )
     schematic_basic_authoring.register(
         mcp,
