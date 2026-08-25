@@ -98,6 +98,8 @@ vcs = [
 
 [project.scripts]
 kicad-mcp-pro = "kicad_mcp.server:main"
+kicadq = "kicad_mcp.shell_cli:main"
+kicad-mcp-cli = "kicad_mcp.compact_server:main"
 
 [project.urls]
 Homepage = "https://github.com/oaslananka/kicad-mcp-pro"

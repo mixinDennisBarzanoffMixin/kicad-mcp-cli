@@ -83,6 +83,22 @@ fraction of KiCad's programmatic surface the server drives is tracked openly in 
 
 ## Quick Start
 
+### Shell-first fork
+
+This checkout adds `kicadq`, a pipe-friendly facade over the full backend, and
+`kicad-mcp-cli`, a compact MCP server that publishes only three discovery/run/search
+tools instead of expanding the entire backend catalog into agent context.
+
+```bash
+uv run kicadq tools routing --format jsonl | jq -r '.name'
+uv run kicadq schema pcb_get_nets | jq '.input_schema'
+uv run kicadq -C ./board call pcb_get_nets --format raw | jq
+uv run kicadq -C ./board grep 'USB|VBUS' | jq -r '[.path,.line,.text] | @tsv'
+```
+
+See the [shell-first guide](docs/cli-first.md) for JSON input, stdin, `--set`,
+JSONL, `rg`, exit-code, and compact MCP examples.
+
 ### Desktop App
 
 Download the latest installer from the
