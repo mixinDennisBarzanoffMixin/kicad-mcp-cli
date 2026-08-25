@@ -24,6 +24,7 @@ from .geometry import DEFAULT_FONT_MM, Box, TextField
 # Gap between the body edge and the nearest field, and between stacked fields.
 DEFAULT_FIELD_MARGIN_MM = 1.27
 DEFAULT_LINE_PITCH_MM = 1.778  # one schematic grid step between stacked lines
+MAX_FIELD_MARGIN_STEPS = 10
 
 # Side preference when several sides are equally clear. KiCad favours placing
 # text to the right, then above, matching most engineers' reading habit.
@@ -158,20 +159,31 @@ def autoplace_fields(
     visible = [s for s in specs if s.text]
     avoid = pin_sides(body, pin_points)
 
-    best_cost: tuple[float, float, int] | None = None
+    best_cost: tuple[float, float, int, int] | None = None
     best_coords: list[tuple[float, float, frozenset[str]]] = []
     for side in _SIDE_ORDER:
-        coords = _stacked_boxes_for_side(
-            side, body, visible, margin_mm=margin_mm, pitch_mm=pitch_mm
-        )
-        boxes = [
-            TextField(spec.text, x, y, 0.0, spec.font_mm, bold=spec.bold, justify=just).box()
-            for spec, (x, y, just) in zip(visible, coords, strict=True)
-        ]
-        cost = _side_cost(side, boxes, obstacles, avoid)
-        if best_cost is None or cost < best_cost:
-            best_cost = cost
-            best_coords = coords
+        for margin_step in range(MAX_FIELD_MARGIN_STEPS + 1):
+            effective_margin = margin_mm + margin_step * pitch_mm
+            coords = _stacked_boxes_for_side(
+                side, body, visible, margin_mm=effective_margin, pitch_mm=pitch_mm
+            )
+            boxes = [
+                TextField(
+                    spec.text,
+                    x,
+                    y,
+                    0.0,
+                    spec.font_mm,
+                    bold=spec.bold,
+                    justify=just,
+                ).box()
+                for spec, (x, y, just) in zip(visible, coords, strict=True)
+            ]
+            pin_conflict, overlap, preference_rank = _side_cost(side, boxes, obstacles, avoid)
+            cost = (pin_conflict, overlap, margin_step, preference_rank)
+            if best_cost is None or cost < best_cost:
+                best_cost = cost
+                best_coords = coords
 
     placements: list[FieldPlacement] = []
     coord_iter = iter(best_coords)

@@ -53,6 +53,24 @@ def test_fields_move_off_a_blocked_side() -> None:
         assert box.intersection_area(right_obstacle) == 0.0
 
 
+def test_fields_expand_outward_when_nearby_obstacles_block_every_side() -> None:
+    specs = [FieldSpec("Reference", "U1"), FieldSpec("Value", "LONG_DEVICE_VALUE")]
+    body = Box(-2.5, -2.5, 2.5, 2.5)
+    pins = [(-3.8, 0.0), (3.8, 0.0), (0.0, -3.8), (0.0, 3.8)]
+    close_ring = [
+        Box(2.5, -4.0, 6.0, 4.0),
+        Box(-6.0, -4.0, -2.5, 4.0),
+        Box(-6.0, -6.0, 6.0, -2.5),
+        Box(-6.0, 2.5, 6.0, 6.0),
+    ]
+
+    placements = autoplace_fields(body, pins, close_ring, specs)
+
+    for spec, placement in zip(specs, placements, strict=True):
+        box = placement.text_field(spec.text, spec.font_mm).box()
+        assert all(box.intersection_area(obstacle) == 0.0 for obstacle in close_ring)
+
+
 def test_empty_field_keeps_one_to_one_mapping() -> None:
     specs = [FieldSpec("Reference", "R1"), FieldSpec("Value", "")]
     placements = autoplace_fields(VERTICAL_BODY, VERTICAL_PINS, [], specs)

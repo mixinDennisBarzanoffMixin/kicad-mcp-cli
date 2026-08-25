@@ -14,6 +14,7 @@ from ..deep_inspection import (
     project_snapshot,
     route_plan,
 )
+from ..schematic_spatial import schematic_spatial_map
 from .metadata import headless_compatible
 
 
@@ -49,20 +50,37 @@ def register(mcp: FastMCP) -> None:
         sheet: str = "",
         net: str = "",
         reference: str = "",
+        view: str = "semantic",
+        height: int = 32,
+        center_reference: str = "",
     ) -> str:
-        """Render subsystem, component, net/pin, or physical-PCB text maps.
+        """Render semantic project maps or one geometry-first schematic page.
 
         Zoom 0 is the sheet architecture, 1 lists components and footprints, 2
-        renders net-to-pin connectivity, and 3 renders board geometry.
+        renders net-to-pin connectivity, and 3 renders board geometry. Set
+        ``view="spatial"`` to use zoom as a bounded schematic viewport and show
+        component positions, zones, wires, labels, nets, and nearby labels.
         """
         if zoom not in range(4):
             raise ValueError("zoom must be between 0 and 3")
+        if view not in {"semantic", "spatial"}:
+            raise ValueError("view must be 'semantic' or 'spatial'")
         snapshot = filter_snapshot(
             project_snapshot(get_config().project_root),
             sheet=sheet,
             net=net,
             reference=reference,
         )
+        if view == "spatial":
+            return schematic_spatial_map(
+                snapshot,
+                get_config().project_root,
+                zoom=zoom,
+                width=width,
+                height=height,
+                sheet=sheet,
+                center_reference=center_reference or reference,
+            )
         return ascii_map(snapshot, zoom=zoom, width=width)
 
     @mcp.tool()

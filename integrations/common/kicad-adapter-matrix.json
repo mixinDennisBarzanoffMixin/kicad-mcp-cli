@@ -312,7 +312,7 @@
           "toolCount": 23
         },
         "pcb_read": {
-          "availableCount": 25,
+          "availableCount": 27,
           "blockedCount": 2,
           "canarySurfaces": [
             "read"
@@ -326,10 +326,10 @@
             "local-filesystem"
           ],
           "selectedBackends": {
-            "local-engine": 25,
+            "local-engine": 27,
             "unavailable": 2
           },
-          "toolCount": 27
+          "toolCount": 29
         },
         "pcb_write": {
           "availableCount": 0,
@@ -370,7 +370,7 @@
           "toolCount": 8
         },
         "project": {
-          "availableCount": 31,
+          "availableCount": 33,
           "blockedCount": 0,
           "canarySurfaces": [
             "read"
@@ -383,10 +383,10 @@
             "kicad-cli"
           ],
           "selectedBackends": {
-            "local-engine": 15,
+            "local-engine": 17,
             "local-filesystem": 16
           },
-          "toolCount": 31
+          "toolCount": 33
         },
         "release_export": {
           "availableCount": 0,
@@ -427,7 +427,7 @@
           "toolCount": 15
         },
         "schematic": {
-          "availableCount": 92,
+          "availableCount": 95,
           "blockedCount": 1,
           "canarySurfaces": [
             "read",
@@ -444,11 +444,11 @@
             "kicad-cli"
           ],
           "selectedBackends": {
-            "guarded-schematic-file": 69,
+            "guarded-schematic-file": 72,
             "local-engine": 23,
             "unavailable": 1
           },
-          "toolCount": 93
+          "toolCount": 96
         },
         "signal_integrity": {
           "availableCount": 12,
@@ -636,7 +636,7 @@
           "toolCount": 23
         },
         "pcb_read": {
-          "availableCount": 27,
+          "availableCount": 29,
           "blockedCount": 0,
           "canarySurfaces": [
             "read"
@@ -651,9 +651,9 @@
           ],
           "selectedBackends": {
             "kicad-gui-ipc": 2,
-            "local-engine": 25
+            "local-engine": 27
           },
-          "toolCount": 27
+          "toolCount": 29
         },
         "pcb_write": {
           "availableCount": 48,
@@ -694,7 +694,7 @@
           "toolCount": 8
         },
         "project": {
-          "availableCount": 31,
+          "availableCount": 33,
           "blockedCount": 0,
           "canarySurfaces": [
             "read"
@@ -707,10 +707,10 @@
             "kicad-cli"
           ],
           "selectedBackends": {
-            "local-engine": 15,
+            "local-engine": 17,
             "local-filesystem": 16
           },
-          "toolCount": 31
+          "toolCount": 33
         },
         "release_export": {
           "availableCount": 2,
@@ -751,7 +751,7 @@
           "toolCount": 15
         },
         "schematic": {
-          "availableCount": 93,
+          "availableCount": 96,
           "blockedCount": 0,
           "canarySurfaces": [
             "read",
@@ -768,11 +768,11 @@
             "kicad-cli"
           ],
           "selectedBackends": {
-            "guarded-schematic-file": 69,
+            "guarded-schematic-file": 72,
             "kicad-gui-ipc": 1,
             "local-engine": 23
           },
-          "toolCount": 93
+          "toolCount": 96
         },
         "signal_integrity": {
           "availableCount": 12,
@@ -960,7 +960,7 @@
           "toolCount": 23
         },
         "pcb_read": {
-          "availableCount": 27,
+          "availableCount": 29,
           "blockedCount": 0,
           "canarySurfaces": [
             "read"
@@ -975,9 +975,9 @@
           ],
           "selectedBackends": {
             "kicad-11-headless-ipc": 2,
-            "local-engine": 25
+            "local-engine": 27
           },
-          "toolCount": 27
+          "toolCount": 29
         },
         "pcb_write": {
           "availableCount": 48,
@@ -1018,7 +1018,7 @@
           "toolCount": 8
         },
         "project": {
-          "availableCount": 31,
+          "availableCount": 33,
           "blockedCount": 0,
           "canarySurfaces": [
             "read"
@@ -1031,10 +1031,10 @@
             "kicad-cli"
           ],
           "selectedBackends": {
-            "local-engine": 15,
+            "local-engine": 17,
             "local-filesystem": 16
           },
-          "toolCount": 31
+          "toolCount": 33
         },
         "release_export": {
           "availableCount": 2,
@@ -1075,7 +1075,7 @@
           "toolCount": 15
         },
         "schematic": {
-          "availableCount": 93,
+          "availableCount": 96,
           "blockedCount": 0,
           "canarySurfaces": [
             "read",
@@ -1092,11 +1092,11 @@
             "kicad-cli"
           ],
           "selectedBackends": {
-            "guarded-schematic-file": 69,
+            "guarded-schematic-file": 72,
             "kicad-11-headless-ipc": 1,
             "local-engine": 23
           },
-          "toolCount": 93
+          "toolCount": 96
         },
         "signal_integrity": {
           "availableCount": 12,
@@ -1196,7 +1196,7 @@
     "previewBaseline": "11.x",
     "publicSupportClaim": "KiCad 11 remains preview until native canaries pass.",
     "stableBaseline": "10.0.x",
-    "toolCount": 386
+    "toolCount": 393
   },
   "tools": [
     {
@@ -5228,7 +5228,55 @@
       },
       "runtime": "none",
       "tier": "read",
+      "tool": "pcb_get_placement_plan",
+      "writesFiles": false
+    },
+    {
+      "category": "pcb_read",
+      "routes": {
+        "degradedNoKiCad": {
+          "available": true,
+          "backend": "local-engine",
+          "mutationGuard": null
+        },
+        "kicad10Gui": {
+          "available": true,
+          "backend": "local-engine",
+          "mutationGuard": null
+        },
+        "kicad11Headless": {
+          "available": true,
+          "backend": "local-engine",
+          "mutationGuard": null
+        }
+      },
+      "runtime": "none",
+      "tier": "read",
       "tool": "pcb_get_ratsnest",
+      "writesFiles": false
+    },
+    {
+      "category": "pcb_read",
+      "routes": {
+        "degradedNoKiCad": {
+          "available": true,
+          "backend": "local-engine",
+          "mutationGuard": null
+        },
+        "kicad10Gui": {
+          "available": true,
+          "backend": "local-engine",
+          "mutationGuard": null
+        },
+        "kicad11Headless": {
+          "available": true,
+          "backend": "local-engine",
+          "mutationGuard": null
+        }
+      },
+      "runtime": "none",
+      "tier": "read",
+      "tool": "pcb_get_route_plan",
       "writesFiles": false
     },
     {
@@ -6478,6 +6526,54 @@
       "tier": "write",
       "tool": "project_generate_design_prompt",
       "writesFiles": true
+    },
+    {
+      "category": "project",
+      "routes": {
+        "degradedNoKiCad": {
+          "available": true,
+          "backend": "local-engine",
+          "mutationGuard": null
+        },
+        "kicad10Gui": {
+          "available": true,
+          "backend": "local-engine",
+          "mutationGuard": null
+        },
+        "kicad11Headless": {
+          "available": true,
+          "backend": "local-engine",
+          "mutationGuard": null
+        }
+      },
+      "runtime": "none",
+      "tier": "read",
+      "tool": "project_get_ascii_map",
+      "writesFiles": false
+    },
+    {
+      "category": "project",
+      "routes": {
+        "degradedNoKiCad": {
+          "available": true,
+          "backend": "local-engine",
+          "mutationGuard": null
+        },
+        "kicad10Gui": {
+          "available": true,
+          "backend": "local-engine",
+          "mutationGuard": null
+        },
+        "kicad11Headless": {
+          "available": true,
+          "backend": "local-engine",
+          "mutationGuard": null
+        }
+      },
+      "runtime": "none",
+      "tier": "read",
+      "tool": "project_get_deep_snapshot",
+      "writesFiles": false
     },
     {
       "category": "project",
@@ -8667,6 +8763,54 @@
       "category": "schematic",
       "routes": {
         "degradedNoKiCad": {
+          "available": true,
+          "backend": "guarded-schematic-file",
+          "mutationGuard": "atomic-roundtrip-loss-detection"
+        },
+        "kicad10Gui": {
+          "available": true,
+          "backend": "guarded-schematic-file",
+          "mutationGuard": "atomic-roundtrip-loss-detection"
+        },
+        "kicad11Headless": {
+          "available": true,
+          "backend": "guarded-schematic-file",
+          "mutationGuard": "atomic-roundtrip-loss-detection"
+        }
+      },
+      "runtime": "none",
+      "tier": "write",
+      "tool": "sch_prune_orphan_junctions",
+      "writesFiles": true
+    },
+    {
+      "category": "schematic",
+      "routes": {
+        "degradedNoKiCad": {
+          "available": true,
+          "backend": "guarded-schematic-file",
+          "mutationGuard": "atomic-roundtrip-loss-detection"
+        },
+        "kicad10Gui": {
+          "available": true,
+          "backend": "guarded-schematic-file",
+          "mutationGuard": "atomic-roundtrip-loss-detection"
+        },
+        "kicad11Headless": {
+          "available": true,
+          "backend": "guarded-schematic-file",
+          "mutationGuard": "atomic-roundtrip-loss-detection"
+        }
+      },
+      "runtime": "none",
+      "tier": "write",
+      "tool": "sch_refresh_symbol_from_library",
+      "writesFiles": true
+    },
+    {
+      "category": "schematic",
+      "routes": {
+        "degradedNoKiCad": {
           "available": false,
           "backend": "unavailable",
           "mutationGuard": "atomic-roundtrip-loss-detection"
@@ -8901,6 +9045,30 @@
       "runtime": "none",
       "tier": "write",
       "tool": "sch_set_title_block_info",
+      "writesFiles": true
+    },
+    {
+      "category": "schematic",
+      "routes": {
+        "degradedNoKiCad": {
+          "available": true,
+          "backend": "guarded-schematic-file",
+          "mutationGuard": "atomic-roundtrip-loss-detection"
+        },
+        "kicad10Gui": {
+          "available": true,
+          "backend": "guarded-schematic-file",
+          "mutationGuard": "atomic-roundtrip-loss-detection"
+        },
+        "kicad11Headless": {
+          "available": true,
+          "backend": "guarded-schematic-file",
+          "mutationGuard": "atomic-roundtrip-loss-detection"
+        }
+      },
+      "runtime": "none",
+      "tier": "write",
+      "tool": "sch_slide_overlapping_labels",
       "writesFiles": true
     },
     {

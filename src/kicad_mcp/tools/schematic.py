@@ -33,6 +33,8 @@ from ..models.schematic import (
     PowerSymbolInput,
     UpdatePropertiesInput,
 )
+from ..models.visual_qa import parse_labels as _parse_visual_labels
+from ..models.visual_qa import parse_placed_symbols as _parse_visual_symbols
 from ..models.visual_qa import run_visual_qa as _run_visual_qa
 from ..path_safety import resolve_under
 from ..schematic.back_annotation import SchematicBackAnnotationService
@@ -72,7 +74,7 @@ from ..schematic.template_catalog import SchematicTemplateCatalogService
 from ..schematic.template_instantiation import SchematicTemplateInstantiationService
 from ..schematic.topology import SchematicTopologyService
 from ..utils.cache import clear_ttl_cache
-from ..utils.field_placer import FieldSpec, autoplace_fields
+from ..utils.field_placer import FieldSpec, autoplace_fields, field_extent
 from ..utils.geometry import Box as GeoBox
 from ..utils.geometry import body_box_from_pins, text_extent
 from ..utils.schematic_roundtrip import dropped_nodes
@@ -5140,12 +5142,19 @@ def _update_symbol_property_block(
     return block[:insert_point] + property_block + block[insert_point:]
 
 
-def _set_property_position(block: str, field: str, x: float, y: float, angle: float) -> str:
-    """Rewrite the ``(at x y angle)`` of a named property inside a symbol block.
+def _set_property_position(
+    block: str,
+    field: str,
+    x: float,
+    y: float,
+    angle: float,
+    justify: frozenset[str] = frozenset(),
+) -> str:
+    """Rewrite the position and justification of a named symbol property.
 
     Returns the block unchanged when the property (or its ``at``) is absent, so
-    callers can apply this defensively. Only the property's own ``at`` is touched
-    — the symbol's placement ``at`` and any nested effects are left intact.
+    callers can apply this defensively. Only the property's own ``at`` and
+    ``effects/justify`` are touched — the symbol placement remains intact.
     """
     marker = f'(property "{field}"'
     idx = block.find(marker)
@@ -5159,6 +5168,9 @@ def _set_property_position(block: str, field: str, x: float, y: float, angle: fl
         return block
     new_at = f"(at {_fmt_mm(x)} {_fmt_mm(y)} {int(round(angle))})"
     new_prop = at_pattern.sub(new_at, prop_block, count=1)
+    justify_order = ("left", "right", "top", "bottom", "mirror")
+    justify_value = " ".join(token for token in justify_order if token in justify)
+    new_prop = _set_label_justify(new_prop, justify_value)
     return block[:idx] + new_prop + block[idx + length :]
 
 
@@ -5218,24 +5230,51 @@ def _build_autoplace_fields_mutator(
 
     def mutator(content: str) -> str:
         new_content = content
+        placed = _parse_visual_symbols(content)
+        visual_bodies = {item.reference: item.body for item in placed if item.reference}
+        field_obstacles: dict[str, list[GeoBox]] = {
+            item.reference: [field.box() for field in item.fields]
+            for item in placed
+            if item.reference
+        }
+        label_obstacles = [label.box() for label in _parse_visual_labels(content)]
         for ref in targets:
             match = _find_placed_symbol_block(new_content, ref)
             if match is None:
                 continue
             block, start, end, parsed = match
             body, pins = body_pins.get(ref, _symbol_body_and_pins(parsed))
-            obstacles = [b for other, b in bodies.items() if other != ref]
+            obstacles = [box for other, box in visual_bodies.items() if other != ref]
+            obstacles.extend(
+                fallback
+                for other, fallback in bodies.items()
+                if other != ref and other not in visual_bodies
+            )
+            obstacles.extend(label_obstacles)
+            obstacles.extend(
+                box
+                for other, boxes in field_obstacles.items()
+                if other != ref
+                for box in boxes
+            )
             specs = [
                 FieldSpec("Reference", str(parsed.get("reference", ""))),
                 FieldSpec("Value", str(parsed.get("value", ""))),
             ]
             placements = autoplace_fields(body, pins, obstacles, specs)
+            extent = field_extent(specs, placements)
+            field_obstacles[ref] = [extent] if extent is not None else []
             new_block = block
             for spec, placement in zip(specs, placements, strict=True):
                 if not spec.text:
                     continue
                 new_block = _set_property_position(
-                    new_block, spec.name, placement.x, placement.y, placement.angle
+                    new_block,
+                    spec.name,
+                    placement.x,
+                    placement.y,
+                    placement.angle,
+                    placement.justify,
                 )
             if new_block != block:
                 new_content = new_content[:start] + new_block + new_content[end:]

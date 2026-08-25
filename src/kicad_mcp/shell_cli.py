@@ -41,6 +41,7 @@ from .deep_inspection import (
     route_plan,
     verification_report,
 )
+from .schematic_spatial import schematic_spatial_map
 from .server import build_server
 from .tools.router import TOOL_CATEGORIES, available_profiles
 
@@ -313,11 +314,7 @@ def _resolve_edit_schematic(root: Path, sheet: str) -> Path | None:
     if not query:
         return None
     candidates = [root / relative for relative in _schematic_manifest(root)]
-    exact = [
-        path
-        for path in candidates
-        if query in {path.name.casefold(), path.stem.casefold()}
-    ]
+    exact = [path for path in candidates if query in {path.name.casefold(), path.stem.casefold()}]
     matches = exact or [
         path
         for path in candidates
@@ -463,8 +460,7 @@ async def run_staged_schematic_edit(args: argparse.Namespace) -> dict[str, Any]:
                 "status": "rejected",
                 "promoted": False,
                 "reason": (
-                    "staged verification found corruption, connectivity failure, "
-                    "or new ERC errors"
+                    "staged verification found corruption, connectivity failure, or new ERC errors"
                 ),
                 "tool": args.tool,
                 "tool_result": payload,
@@ -820,6 +816,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     map_command.add_argument("--zoom", type=int, choices=range(4), default=0)
     map_command.add_argument("--width", type=int, default=100)
+    map_command.add_argument(
+        "--view",
+        choices=("semantic", "spatial"),
+        default="semantic",
+        help="preserve the semantic map or render saved schematic geometry",
+    )
+    map_command.add_argument(
+        "--height",
+        type=int,
+        default=32,
+        help="spatial canvas height (bounded to 12..80 rows)",
+    )
+    map_command.add_argument(
+        "--center-ref",
+        default="",
+        help="center spatial zoom on a component reference",
+    )
     map_command.add_argument("--sheet", default="")
     map_command.add_argument("--net", default="")
     map_command.add_argument("--ref", dest="reference", default="")
@@ -1018,7 +1031,20 @@ def main(argv: Sequence[str] | None = None) -> None:
                 net=args.net,
                 reference=args.reference,
             )
-            print(ascii_map(snapshot, zoom=args.zoom, width=args.width))
+            if args.view == "spatial":
+                print(
+                    schematic_spatial_map(
+                        snapshot,
+                        args.project_dir or ".",
+                        zoom=args.zoom,
+                        width=args.width,
+                        height=args.height,
+                        sheet=args.sheet,
+                        center_reference=args.center_ref or args.reference,
+                    )
+                )
+            else:
+                print(ascii_map(snapshot, zoom=args.zoom, width=args.width))
             return
         if args.command == "route":
             plan = route_plan(

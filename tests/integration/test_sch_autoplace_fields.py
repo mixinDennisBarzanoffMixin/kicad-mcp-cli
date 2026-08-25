@@ -104,3 +104,37 @@ async def test_autoplace_fields_limits_to_requested_reference(sample_project, mo
     )
     # Only R1 is in scope, so at most R1 is reported as repositioned.
     assert "R2" not in result
+
+
+@pytest.mark.anyio
+async def test_autoplace_fields_avoids_visible_label_boxes(sample_project, mock_kicad) -> None:
+    server = build_server("schematic")
+    await call_tool_text(
+        server,
+        "sch_add_symbol",
+        {
+            "library": "Device",
+            "symbol_name": "R",
+            "x_mm": 100.0,
+            "y_mm": 100.0,
+            "reference": "R1",
+            "value": "10k",
+        },
+    )
+    await call_tool_text(
+        server,
+        "sch_add_global_label",
+        {
+            "name": "BLOCKING_LABEL_TEXT",
+            "x_mm": 102.54,
+            "y_mm": 100.0,
+            "snap_to_grid": False,
+            "justify": "left",
+        },
+    )
+
+    result = await call_tool_text(server, "sch_autoplace_fields", {})
+    assert "Auto-placed" in result
+
+    after = _text_overlap_codes(await call_tool_text(server, "sch_visual_qa", {}))
+    assert "text_overlap" not in after

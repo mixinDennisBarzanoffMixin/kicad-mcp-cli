@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from kicad_mcp.models import visual_qa
 from kicad_mcp.tools.schematic import _symbol_library_file
 from kicad_mcp.tools.schematic_cosmetics import (
     _connectivity_signature,
@@ -21,6 +22,7 @@ from kicad_mcp.tools.schematic_cosmetics import (
     _mutate_normalize_power_orientation,
     _mutate_normalize_text_sizes,
     _mutate_resolve_label_overlaps,
+    _mutate_slide_overlapping_labels,
     _mutate_straighten_wires,
 )
 
@@ -118,6 +120,64 @@ def test_resolve_label_overlaps_flips_justify_without_moving_anchor() -> None:
     # Anchors are unchanged — connectivity is preserved by construction.
     assert "(at 80 60 0)" in after
     assert _connectivity_signature(sch) == _connectivity_signature(after)
+
+
+def test_resolve_label_overlaps_targets_exact_duplicate_name_instance() -> None:
+    sch = """(kicad_sch
+      (label "DUP" (at 10 10 0) (effects (font (size 1.27 1.27))))
+      (label "OTHER_LONG" (at 80 60 0) (effects (font (size 1.27 1.27))))
+      (label "DUP" (at 80.2 60 0) (effects (font (size 1.27 1.27))))
+    )"""
+
+    after, changes = _mutate_resolve_label_overlaps(sch)
+
+    assert '(label "DUP" (at 10 10 0) (effects (font (size 1.27 1.27))))' in after
+    assert not any(change.get("position") == [10.0, 10.0] for change in changes)
+    assert not visual_qa.detect_label_collisions(visual_qa.parse_labels(after))
+
+
+def test_resolve_label_overlaps_avoids_visible_symbol_fields() -> None:
+    sch = """(kicad_sch
+      (symbol (lib_id "Device:R") (at 50 50 0)
+        (property "Reference" "R1" (at 60 60 0)
+          (effects (font (size 1.27 1.27))))
+        (property "Value" "LONG_VALUE" (at 60 62 0)
+          (effects (font (size 1.27 1.27)))))
+      (label "NET_LABEL" (at 60 62.5 0)
+        (effects (font (size 1.27 1.27))))
+    )"""
+
+    before = visual_qa.detect_text_overlap(
+        visual_qa.parse_placed_symbols(sch), visual_qa.parse_labels(sch)
+    )
+    after, changes = _mutate_resolve_label_overlaps(sch)
+    remaining = visual_qa.detect_text_overlap(
+        visual_qa.parse_placed_symbols(after), visual_qa.parse_labels(after)
+    )
+
+    assert before
+    assert changes
+    assert not remaining
+
+
+def test_slide_overlapping_label_stays_on_wire_and_clears_symbol() -> None:
+    sch = """(kicad_sch
+      (wire (pts (xy 10 20) (xy 20 20)))
+      (symbol (lib_id "Device:R") (at 20 20 0)
+        (property "Reference" "R1" (at 20 15 0)
+          (effects (font (size 1.27 1.27)))))
+      (label "LONG_NET" (at 18 20 0)
+        (effects (font (size 1.27 1.27))))
+    )"""
+
+    before_signature = _connectivity_signature(sch)
+    after, changes = _mutate_slide_overlapping_labels(sch)
+
+    assert changes
+    assert _connectivity_signature(after) == before_signature
+    assert not visual_qa.detect_label_symbol_overlap(
+        visual_qa.parse_placed_symbols(after), visual_qa.parse_labels(after)
+    )
 
 
 def test_flip_justify_transitions() -> None:
@@ -241,6 +301,7 @@ async def test_harness_refuses_connectivity_breaking_mutation(sample_project: Pa
         "sch_align_to_grid",
         "sch_straighten_wires",
         "sch_resolve_label_overlaps",
+        "sch_slide_overlapping_labels",
         "sch_normalize_power_orientation",
         "sch_normalize_text_sizes",
     ],

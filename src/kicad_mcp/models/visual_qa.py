@@ -64,6 +64,12 @@ DENSE_FANOUT_NEIGHBOURS = 6
 # several mm², while legal tight layouts only graze by a fraction of one.
 TEXT_OVERLAP_MIN_AREA_MM2 = 1.0
 SYMBOL_OVERLAP_MIN_AREA_MM2 = 1.0
+# Symbol envelopes include pin strokes. A label legitimately anchored at a pin
+# tip can intersect that line-only envelope by roughly 1.6 mm² without crossing
+# the component body, so require a larger area for a body-overlap defect.
+LABEL_SYMBOL_OVERLAP_MIN_AREA_MM2 = 2.0
+SYMBOL_LABEL_DENSITY_MARGIN_MM = 3.0
+SYMBOL_LABEL_DENSITY_COUNT = 4
 
 # KiCad hides these property fields by default, so they are not drawn and must not
 # contribute to a symbol's visible text extent.
@@ -505,6 +511,77 @@ def detect_text_overlap(
                     y=cy,
                 )
             )
+    return findings
+
+
+def detect_label_symbol_overlap(
+    symbols: list[PlacedSymbol], labels: list[LabelItem]
+) -> list[VisualFinding]:
+    """Flag net-label text that renders across a symbol body/pin envelope.
+
+    A label anchor may correctly coincide with a pin tip while its text extends
+    in the wrong direction through the component. ERC sees a valid connection;
+    text/text-only QA also misses it. Comparing the rendered label box against
+    each real symbol envelope catches that common generated-layout defect.
+    """
+
+    findings: list[VisualFinding] = []
+    for label in labels:
+        # Short local net labels are commonly anchored directly on a pin stub;
+        # their text legitimately crosses the library's pin-line envelope. Dense
+        # collections of those are handled by detect_symbol_label_density. Shaped
+        # global/hierarchical labels are larger and should stay outside bodies.
+        if label.kind == "local":
+            continue
+        label_box = label.box()
+        for symbol in symbols:
+            area = label_box.intersection_area(symbol.body)
+            if area < LABEL_SYMBOL_OVERLAP_MIN_AREA_MM2:
+                continue
+            name = symbol.reference or symbol.lib_id or "symbol"
+            findings.append(
+                VisualFinding(
+                    "WARN",
+                    "label_symbol_overlap",
+                    f"Label '{label.text}' overlaps symbol {name} (~{area:.1f} mm²). "
+                    "Orient the label text away from the component body.",
+                    ref=label.text,
+                    x=label.x,
+                    y=label.y,
+                )
+            )
+    return findings
+
+
+def detect_symbol_label_density(
+    symbols: list[PlacedSymbol],
+    labels: list[LabelItem],
+    *,
+    margin_mm: float = SYMBOL_LABEL_DENSITY_MARGIN_MM,
+    label_count: int = SYMBOL_LABEL_DENSITY_COUNT,
+) -> list[VisualFinding]:
+    """Flag components surrounded by too many nearby rendered net labels."""
+
+    findings: list[VisualFinding] = []
+    for symbol in symbols:
+        neighbourhood = symbol.body.expanded(margin_mm)
+        nearby = [label for label in labels if label.box().overlaps(neighbourhood)]
+        if len(nearby) < label_count:
+            continue
+        name = symbol.reference or symbol.lib_id or "symbol"
+        examples = ", ".join(label.text for label in nearby[:4])
+        findings.append(
+            VisualFinding(
+                "WARN",
+                "symbol_label_density",
+                f"Symbol {name} has {len(nearby)} labels crowded within {margin_mm:.1f} mm "
+                f"({examples}); group the surrounding circuit or replace repeated labels "
+                "with readable local wiring.",
+                ref=name,
+                x=symbol.x,
+                y=symbol.y,
+            )
+        )
     return findings
 
 
@@ -954,6 +1031,8 @@ COSMETIC_PENALTIES: dict[str, float] = {
     "offsheet_symbol": 12.0,
     "text_overlap": 10.0,
     "label_overlap": 8.0,
+    "label_symbol_overlap": 10.0,
+    "symbol_label_density": 6.0,
     "offsheet_label": 8.0,
     "power_symbol_sideways": 6.0,
     "grid_misalignment": 4.0,
@@ -973,6 +1052,8 @@ COSMETIC_CATEGORIES: dict[str, str] = {
     "symbol_overlap": "readability",
     "text_overlap": "readability",
     "label_overlap": "readability",
+    "label_symbol_overlap": "readability",
+    "symbol_label_density": "readability",
     "offsheet_symbol": "readability",
     "offsheet_label": "readability",
     "dense_label_fanout": "readability",
@@ -1040,6 +1121,8 @@ def run_cosmetic_qa(sch_text: str) -> dict[str, object]:
     findings.extend(detect_label_collisions(labels))
     findings.extend(detect_symbol_overlap(placed))
     findings.extend(detect_text_overlap(placed, labels))
+    findings.extend(detect_label_symbol_overlap(placed, labels))
+    findings.extend(detect_symbol_label_density(placed, labels))
     findings.extend(detect_offsheet_boxes(placed, labels, extent))
     findings.extend(detect_dense_fanout(labels))
     findings.extend(detect_grid_misalignment(placed, labels, wires, junctions))
@@ -1086,6 +1169,8 @@ def run_visual_qa(sch_text: str, *, render_path: str = "") -> dict[str, object]:
     findings.extend(detect_label_collisions(labels))
     findings.extend(detect_symbol_overlap(placed))
     findings.extend(detect_text_overlap(placed, labels))
+    findings.extend(detect_label_symbol_overlap(placed, labels))
+    findings.extend(detect_symbol_label_density(placed, labels))
     findings.extend(detect_offsheet_boxes(placed, labels, extent))
     findings.extend(detect_dense_fanout(labels))
     findings.extend(check_title_block(sch_text))
@@ -1119,11 +1204,13 @@ __all__ = [
     "detect_font_size_inconsistency",
     "detect_grid_misalignment",
     "detect_label_collisions",
+    "detect_label_symbol_overlap",
     "detect_offsheet",
     "detect_offsheet_boxes",
     "detect_power_symbol_orientation",
     "detect_sheet_density_imbalance",
     "detect_symbol_overlap",
+    "detect_symbol_label_density",
     "detect_text_overlap",
     "parse_junctions",
     "parse_labels",

@@ -320,6 +320,7 @@ TOOL_CATEGORIES: dict[str, ToolCategory] = {
             "sch_align_to_grid",
             "sch_straighten_wires",
             "sch_resolve_label_overlaps",
+            "sch_slide_overlapping_labels",
             "sch_normalize_power_orientation",
             "sch_normalize_text_sizes",
             "sch_visual_baseline_set",

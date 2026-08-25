@@ -14,10 +14,12 @@ from kicad_mcp.models.visual_qa import (
     detect_font_size_inconsistency,
     detect_grid_misalignment,
     detect_label_collisions,
+    detect_label_symbol_overlap,
     detect_offsheet,
     detect_offsheet_boxes,
     detect_power_symbol_orientation,
     detect_sheet_density_imbalance,
+    detect_symbol_label_density,
     detect_symbol_overlap,
     detect_text_overlap,
     parse_junctions,
@@ -238,6 +240,33 @@ def test_overlap_schematic_run_warns() -> None:
     assert report["status"] == "WARN"
     codes = {finding["code"] for finding in report["findings"]}
     assert {"symbol_overlap", "text_overlap"} & codes
+
+
+def test_detect_label_symbol_overlap_catches_text_drawn_through_body() -> None:
+    sch = OVERLAP_SCH.replace(
+        "\n)",
+        '\n  (global_label "BAD_NET" (shape bidirectional) (at 100 100 0) '
+        '(effects (font (size 1.27 1.27))))\n)',
+        1,
+    )
+
+    findings = detect_label_symbol_overlap(parse_placed_symbols(sch), parse_labels(sch))
+
+    assert any(f.code == "label_symbol_overlap" and f.ref == "BAD_NET" for f in findings)
+
+
+def test_detect_symbol_label_density_reports_crowded_component() -> None:
+    labels = "\n".join(
+        f'  (label "N{idx}" (at {99 + idx * 0.2} 100 0) '
+        '(effects (font (size 1.27 1.27))))'
+        for idx in range(4)
+    )
+    sch = OVERLAP_SCH.replace("\n)", f"\n{labels}\n)", 1)
+
+    findings = detect_symbol_label_density(parse_placed_symbols(sch), parse_labels(sch))
+
+    assert findings
+    assert all(f.code == "symbol_label_density" for f in findings)
 
 
 @pytest.mark.anyio

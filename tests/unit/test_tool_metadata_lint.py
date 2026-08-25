@@ -56,6 +56,7 @@ def test_direct_tool_references_for_static_coverage_lint() -> None:
         "pcb_add_copper_zone",
         "pcb_bga_fanout",
         "project_infer_design_spec",
+        "sch_refresh_symbol_from_library",
     }
 
     assert direct_references <= declared_tools
