@@ -42,6 +42,7 @@ type _RouteState = tuple[Point, int]
 _FLOAT = r"-?\d+(?:\.\d+)?"
 _TOLERANCE = 1e-4
 _GRID_MM = 2.54
+_SCHEMATIC_GRID_MM = 1.27
 _BODY_CLEARANCE_MM = 0.4
 _LABEL_CLEARANCE_MM = 0.2
 _LOCAL_ROUTE_MARGIN_MM = 4 * _GRID_MM
@@ -515,10 +516,10 @@ def _local_route_window(anchors: list[Point]) -> Box:
     span = max(max(xs) - min(xs), max(ys) - min(ys))
     margin = max(_LOCAL_ROUTE_MARGIN_MM, min(2 * _LOCAL_ROUTE_MARGIN_MM, span / 2))
     return Box(
-        min(xs) - margin,
-        min(ys) - margin,
-        max(xs) + margin,
-        max(ys) + margin,
+        math.floor((min(xs) - margin) / _SCHEMATIC_GRID_MM) * _SCHEMATIC_GRID_MM,
+        math.floor((min(ys) - margin) / _SCHEMATIC_GRID_MM) * _SCHEMATIC_GRID_MM,
+        math.ceil((max(xs) + margin) / _SCHEMATIC_GRID_MM) * _SCHEMATIC_GRID_MM,
+        math.ceil((max(ys) + margin) / _SCHEMATIC_GRID_MM) * _SCHEMATIC_GRID_MM,
     )
 
 
@@ -620,8 +621,9 @@ def _bounded_orthogonal_path(
 
     def add_lane(value: float, values: set[float], low: float, high: float) -> None:
         for candidate in (value - _GRID_MM, value, value + _GRID_MM):
-            if low - _TOLERANCE <= candidate <= high + _TOLERANCE:
-                values.add(round(candidate, 4))
+            snapped = round(round(candidate / _SCHEMATIC_GRID_MM) * _SCHEMATIC_GRID_MM, 4)
+            if low - _TOLERANCE <= snapped <= high + _TOLERANCE:
+                values.add(snapped)
 
     for box in local_boxes:
         add_lane(box.x_min, x_values, window.x_min, window.x_max)

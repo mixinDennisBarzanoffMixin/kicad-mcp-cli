@@ -451,6 +451,14 @@ def test_local_obstacle_edge_search_routes_around_unrelated_wire_deterministical
     safe = [candidate for candidate in first_sig["candidate_routes"] if candidate["safe"]]
     assert len(safe) == 1
     assert len(safe[0]["segments"]) >= 3
+    interior = {
+        coordinate
+        for segment in safe[0]["segments"]
+        for point in (segment["start_mm"], segment["end_mm"])
+        for coordinate in point
+        if coordinate not in {10.0, 12.0, 18.0}
+    }
+    assert all(abs(value / 1.27 - round(value / 1.27)) < 1e-4 for value in interior)
     assert any(
         min(segment["start_mm"][1], segment["end_mm"][1]) < 3
         or max(segment["start_mm"][1], segment["end_mm"][1]) > 15
