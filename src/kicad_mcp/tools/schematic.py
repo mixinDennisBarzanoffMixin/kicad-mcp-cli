@@ -4539,10 +4539,10 @@ def _plan_netlist_wires(
 def _resolve_intentional_no_connects(
     symbols: list[AddSymbolInput],
     nets: list[dict[str, Any]],
-    endpoints: list[str],
+    endpoints: list[str | dict[str, Any]],
     snap_to_grid: bool,
 ) -> list[tuple[float, float]]:
-    """Resolve ``REF.PIN`` declarations to safe KiCad no-connect coordinates.
+    """Resolve exact endpoint declarations to safe KiCad no-connect coordinates.
 
     Endpoint names are resolved through the same exact pin-number/name aliases
     used by net compilation.  A declaration is rejected when it is missing,
@@ -4575,8 +4575,9 @@ def _resolve_intentional_no_connects(
     resolved: list[tuple[float, float]] = []
     seen_points: dict[tuple[float, float], str] = {}
     failures: list[str] = []
-    for endpoint_text in endpoints:
-        endpoint = _normalize_net_endpoint(endpoint_text)
+    for endpoint_input in endpoints:
+        endpoint = _normalize_net_endpoint(endpoint_input)
+        endpoint_text = _describe_net_endpoint(endpoint)
         if _endpoint_reference(endpoint) is None or _endpoint_pin(endpoint) is None:
             failures.append(f"{endpoint_text}: expected an exact REF.PIN endpoint")
             continue
@@ -4621,7 +4622,7 @@ def _prepare_build_circuit_inputs(
     labels: list[dict[str, Any]] | None = None,
     power_symbols: list[dict[str, Any]] | None = None,
     nets: list[dict[str, Any]] | None = None,
-    intentional_no_connect_endpoints: list[str] | None = None,
+    intentional_no_connect_endpoints: list[str | dict[str, Any]] | None = None,
     snap_to_grid: bool = True,
     auto_layout: bool = False,
     unsafe_routed_wires: bool = False,
@@ -6323,7 +6324,7 @@ def _prepare_circuit_compilation_inputs(
     labels: list[dict[str, Any]] | None = None,
     power_symbols: list[dict[str, Any]] | None = None,
     nets: list[dict[str, Any]] | None = None,
-    intentional_no_connect_endpoints: list[str] | None = None,
+    intentional_no_connect_endpoints: list[str | dict[str, Any]] | None = None,
     snap_to_grid: bool = True,
     auto_layout: bool = False,
     unsafe_routed_wires: bool = False,

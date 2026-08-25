@@ -33,7 +33,7 @@ def register(
         labels: list[dict[str, Any]] | None = None,
         power_symbols: list[dict[str, Any]] | None = None,
         nets: list[dict[str, Any]] | None = None,
-        intentional_no_connect_endpoints: list[str] | None = None,
+        intentional_no_connect_endpoints: list[str | dict[str, Any]] | None = None,
         snap_to_grid: bool = True,
         auto_layout: bool = False,
         unsafe_routed_wires: bool = False,
@@ -63,7 +63,7 @@ def register(
         labels: list[dict[str, Any]] | None = None,
         power_symbols: list[dict[str, Any]] | None = None,
         nets: list[dict[str, Any]] | None = None,
-        intentional_no_connect_endpoints: list[str] | None = None,
+        intentional_no_connect_endpoints: list[str | dict[str, Any]] | None = None,
         snap_to_grid: bool = True,
         auto_layout: bool = False,
         unsafe_routed_wires: bool = False,
@@ -98,10 +98,12 @@ def register(
         design), ``"local"`` (sheet-local label), or ``"hierarchical"`` (with an
         optional ``shape`` of input/output/bidirectional for sheet-pin wiring).
 
-        ``intentional_no_connect_endpoints`` accepts exact ``REF.PIN`` strings.
-        Every declaration is resolved against the placed symbol and rejected if
-        missing, duplicated, or also assigned to a net; validated declarations
-        are emitted as KiCad no-connect markers so ERC can distinguish intent.
+        ``intentional_no_connect_endpoints`` accepts compatible exact ``REF.PIN``
+        strings. For multi-unit parts, use the authoritative endpoint object
+        ``{"reference": "U2", "unit": 3, "pin": "100"}``. Every declaration
+        is resolved against the placed symbol and rejected if missing, ambiguous,
+        duplicated, or also assigned to a net; validated declarations are emitted
+        as KiCad no-connect markers so ERC can distinguish intent.
 
         Set ``unsafe_routed_wires=True`` only if you explicitly want routed Manhattan
         wire segments between pins.  That star-routing can cross unrelated pins or

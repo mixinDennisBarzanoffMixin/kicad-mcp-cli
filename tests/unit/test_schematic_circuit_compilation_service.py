@@ -89,7 +89,7 @@ class CompilationHarness:
         labels: list[dict[str, Any]] | None = None,
         power_symbols: list[dict[str, Any]] | None = None,
         nets: list[dict[str, Any]] | None = None,
-        intentional_no_connect_endpoints: list[str] | None = None,
+        intentional_no_connect_endpoints: list[str | dict[str, Any]] | None = None,
         snap_to_grid: bool = True,
         auto_layout: bool = False,
         unsafe_routed_wires: bool = False,

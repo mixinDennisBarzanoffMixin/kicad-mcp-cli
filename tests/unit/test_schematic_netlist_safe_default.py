@@ -315,6 +315,47 @@ def test_intentional_no_connects_resolve_exact_pins_and_reject_wired_pins(
         )
 
 
+def test_intentional_no_connects_support_explicit_multi_unit_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unit_one = AddSymbolInput(
+        library="Test",
+        symbol_name="Part",
+        reference="U2",
+        value="part",
+        unit=1,
+        x_mm=50.0,
+        y_mm=50.0,
+    )
+    unit_two = AddSymbolInput(
+        library="Test",
+        symbol_name="Part",
+        reference="U2",
+        value="part",
+        unit=2,
+        x_mm=80.0,
+        y_mm=50.0,
+    )
+    pin_positions = lambda _lib, _name, x, y, *_args: {"9": (x + 5.0, y)}  # noqa: E731
+    monkeypatch.setattr(sch, "get_pin_positions", pin_positions)
+    monkeypatch.setattr(sch, "get_pin_alias_positions", pin_positions)
+
+    assert sch._resolve_intentional_no_connects(
+        [unit_one, unit_two],
+        [],
+        [{"reference": "U2", "unit": 2, "pin": "9"}],
+        True,
+    ) == [(85.01, 49.53)]
+
+    with pytest.raises(ValueError, match="ambiguous across units 1, 2"):
+        sch._resolve_intentional_no_connects(
+            [unit_one, unit_two],
+            [],
+            ["U2.9"],
+            True,
+        )
+
+
 def test_net_compilation_report_announces_routing_mode() -> None:
     safe = sch._render_net_compilation_report(
         symbols=[],
