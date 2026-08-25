@@ -113,6 +113,22 @@ def register(mcp: FastMCP) -> None:
         if not in_path.exists():
             return f"Input footprint file or directory not found: {input_path}"
 
+        # KiCad 10 documents INPUT_FILE_OR_DIR but rejects a standalone
+        # ``.kicad_mod`` file. Normalize that documented form to the containing
+        # ``.pretty`` library plus an exact footprint selector.
+        selected_footprint = footprint.strip()
+        cli_input_path = in_path
+        if in_path.is_file():
+            if in_path.suffix != ".kicad_mod":
+                return f"Input footprint file must use the .kicad_mod suffix: {input_path}"
+            if selected_footprint and selected_footprint != in_path.stem:
+                return (
+                    f"Footprint selector {selected_footprint!r} does not match input file "
+                    f"{in_path.stem!r}."
+                )
+            selected_footprint = in_path.stem
+            cli_input_path = in_path.parent
+
         out_dir = _ensure_output_dir("footprints")
         if output_dir:
             try:
@@ -122,23 +138,44 @@ def register(mcp: FastMCP) -> None:
                     out_dir = Path(output_dir).expanduser().resolve()
             except Exception as exc:
                 return f"Unsafe output directory: {exc}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        before = {
+            path.resolve(): (path.stat().st_mtime_ns, path.stat().st_size)
+            for path in out_dir.glob("*.svg")
+        }
 
         cmd = ["fp", "export", "svg"]
         cmd.extend(["--output", str(out_dir)])
-        if footprint:
-            cmd.extend(["--footprint", footprint])
+        if selected_footprint:
+            cmd.extend(["--footprint", selected_footprint])
         if layers:
             cmd.extend(["--layers", ",".join(layers)])
         if theme:
             cmd.extend(["--theme", theme])
         if black_and_white:
             cmd.append("--black-and-white")
-        cmd.append(str(in_path))
+        cmd.append(str(cli_input_path))
 
         code, stdout, stderr = _run_cli(*cmd)
         if code != 0:
             return f"Footprint SVG export failed: {stderr or stdout or 'unknown error'}"
-        return f"Footprint SVG exported successfully to {out_dir}"
+        after = {
+            path.resolve(): (path.stat().st_mtime_ns, path.stat().st_size)
+            for path in out_dir.glob("*.svg")
+        }
+        written = sorted(path for path, state in after.items() if before.get(path) != state)
+        if selected_footprint:
+            expected = (out_dir / f"{selected_footprint}.svg").resolve()
+            if expected in after and expected not in written:
+                # A filesystem can preserve coarse timestamps for a fast
+                # overwrite. Presence of the exact requested artifact is still
+                # stronger evidence than the CLI's zero exit status alone.
+                written = [expected]
+        if not written:
+            detail = stderr or stdout or "kicad-cli returned success without an SVG artifact"
+            return f"Footprint SVG export failed: {detail}"
+        rendered = ", ".join(str(path) for path in written)
+        return f"Footprint SVG exported successfully: {rendered}"
 
     @headless_compatible
     def fp_upgrade(
