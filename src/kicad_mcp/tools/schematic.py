@@ -4947,10 +4947,16 @@ def place_symbol_block(
 
 
 def _append_before_sheet_instances(content: str, block: str) -> str:
+    # Repeated file-backed edits used to preserve every empty line left behind by
+    # earlier deletions.  On child sheets (which commonly have no
+    # ``sheet_instances`` marker), subsequent appends therefore accumulated
+    # thousands of blank lines before the first newly-added object.  Keep a
+    # single visual separator so transactional diffs remain reviewable.
+    content = re.sub(r"\n(?:[ \t]*\n){2,}", "\n\n", content)
     marker = "\t(sheet_instances"
     if marker in content:
         return content.replace(marker, f"{block}\n{marker}", 1)
-    return content.rstrip().rstrip(")") + f"\n{block}\n)\n"
+    return content.rstrip().rstrip(")").rstrip() + f"\n{block}\n)\n"
 
 
 def _duplicate_uuids(content: str) -> set[str]:

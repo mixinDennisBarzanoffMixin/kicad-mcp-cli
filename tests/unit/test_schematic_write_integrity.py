@@ -14,6 +14,7 @@ import pytest
 
 from kicad_mcp.errors import SchematicWriteUnsafeError
 from kicad_mcp.tools.schematic import (
+    _append_before_sheet_instances,
     _duplicate_uuids,
     _normalize_schematic_wire_connectivity,
     _validate_schematic_text,
@@ -225,3 +226,13 @@ def test_wire_normalization_preserves_intermediate_attachment_endpoints() -> Non
     assert "(xy 0 0) (xy 5 0)" in normalized
     assert "(xy 5 0) (xy 10 0)" in normalized
     assert "(xy 10 0) (xy 15 0)" in normalized
+
+
+def test_append_compacts_accumulated_blank_lines_on_child_sheet() -> None:
+    child = "(kicad_sch\n\t(paper \"A4\")\n" + ("\n" * 300) + ")\n"
+
+    updated = _append_before_sheet_instances(child, "\t(label \"NET\" (at 1 1 0))")
+
+    assert "\n\n\n" not in updated
+    assert updated.count('(label "NET"') == 1
+    assert updated.rstrip().endswith(")")
