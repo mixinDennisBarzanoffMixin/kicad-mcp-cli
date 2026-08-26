@@ -59,7 +59,7 @@ from .schematic_railway_rewire import format_railway_rewire_plan, plan_railway_r
 from .schematic_rewire_plan import format_label_compaction_plan, plan_label_compaction
 from .schematic_spatial import schematic_spatial_map
 from .server import build_server
-from .tools.board_file import FLOAT_PATTERN, _parse_board_footprint_blocks
+from .tools.board_file import FLOAT_PATTERN, _iter_blocks, _parse_board_footprint_blocks
 from .tools.router import TOOL_CATEGORIES, available_profiles
 
 JSONValue = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
@@ -894,6 +894,132 @@ def _run_offline_candidate_refinement(
         "candidate": str(artifacts / "staged.kicad_pcb"),
         "diff": str(artifacts / "edit.diff"),
         "diff_lines": len(diff_text.splitlines()),
+    }
+
+
+def _demote_reference_fields_to_fab(content: str, references: Iterable[str]) -> str:
+    """Move selected footprint reference fields off silkscreen without moving roots."""
+    requested = set(references)
+    parsed = _parse_board_footprint_blocks(content)
+    replacements: list[tuple[int, int, str]] = []
+    missing = requested - set(parsed)
+    if missing:
+        raise ValueError("reference fields are missing for: " + ", ".join(sorted(missing)))
+    for reference in sorted(requested):
+        footprint = parsed[reference]
+        block = str(footprint["block"])
+        updated = block
+        changed = False
+        for property_block in _iter_blocks(block, "property"):
+            if not property_block.lstrip().startswith('(property "Reference"'):
+                continue
+            if '(layer "F.SilkS")' not in property_block:
+                break
+            updated_property = property_block.replace(
+                '(layer "F.SilkS")', '(layer "F.Fab")', 1
+            )
+            updated = updated.replace(property_block, updated_property, 1)
+            changed = True
+            break
+        if not changed:
+            raise ValueError(f"{reference}: visible F.SilkS reference field was not found")
+        replacements.append((int(footprint["start"]), int(footprint["end"]), updated))
+    result = content
+    for start, end, updated in sorted(replacements, reverse=True):
+        result = result[:start] + updated + result[end:]
+    before = _parse_board_footprint_blocks(content)
+    after = _parse_board_footprint_blocks(result)
+    for reference, footprint in before.items():
+        candidate = after.get(reference)
+        if candidate is None:
+            raise RuntimeError(f"silk cleanup removed footprint {reference}")
+        before_root = (
+            footprint.get("x_mm"),
+            footprint.get("y_mm"),
+            footprint.get("rotation"),
+        )
+        after_root = (
+            candidate.get("x_mm"),
+            candidate.get("y_mm"),
+            candidate.get("rotation"),
+        )
+        if before_root != after_root:
+            raise RuntimeError(f"silk cleanup changed footprint root transform for {reference}")
+    return result
+
+
+def _run_offline_silk_cleanup(
+    *,
+    root: Path,
+    baseline_content: str,
+    candidate_content: str,
+    artifacts: Path,
+    baseline_source: str,
+    candidate_source: str,
+) -> dict[str, Any]:
+    """Demote only reference fields implicated by new candidate silk findings."""
+    artifacts.mkdir(parents=True, exist_ok=True)
+    baseline_drc = board_drc_evidence(root, board_content=baseline_content)
+    candidate_drc = board_drc_evidence(root, board_content=candidate_content)
+    initial_regressions = _drc_regression_details(baseline_drc, candidate_drc)
+    references = sorted(
+        {
+            match.group(1)
+            for finding in initial_regressions["new_physical_findings"]
+            if str(finding.get("type", "")).startswith("silk")
+            for item in finding.get("items", [])
+            if isinstance(item, dict)
+            for match in [
+                re.match(r"Reference field of (\S+)$", str(item.get("description", "")))
+            ]
+            if match is not None
+        }
+    )
+    if not references:
+        raise ValueError("candidate has no newly offending silkscreen reference fields")
+    staged_content = _demote_reference_fields_to_fab(candidate_content, references)
+    staged_drc = board_drc_evidence(root, board_content=staged_content)
+    final_regressions = _drc_regression_details(baseline_drc, staged_drc)
+    (artifacts / "baseline.kicad_pcb").write_text(baseline_content, encoding="utf-8")
+    (artifacts / "before.kicad_pcb").write_text(candidate_content, encoding="utf-8")
+    (artifacts / "staged.kicad_pcb").write_text(staged_content, encoding="utf-8")
+    diff_text = "".join(
+        difflib.unified_diff(
+            candidate_content.splitlines(keepends=True),
+            staged_content.splitlines(keepends=True),
+            fromfile="before.kicad_pcb",
+            tofile="staged.kicad_pcb",
+        )
+    )
+    (artifacts / "edit.diff").write_text(diff_text, encoding="utf-8")
+    (artifacts / "candidate-before-drc.json").write_text(
+        json.dumps(candidate_drc, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    _write_drc_evidence_artifacts(
+        artifacts, baseline_drc, staged_drc, final_regressions
+    )
+    rejected = bool(final_regressions["regressed"])
+    return {
+        "schema_version": "1.0",
+        "status": "rejected" if rejected else "pass",
+        "candidate_verified": not rejected,
+        "committed": False,
+        "reason": (
+            "silk-cleaned candidate still introduces new DRC findings"
+            if rejected
+            else "silk-cleaned candidate passes baseline DRC regression gate"
+        ),
+        "baseline_source": baseline_source,
+        "candidate_source": candidate_source,
+        "demoted_reference_fields": references,
+        "before_drc": candidate_drc,
+        "staged_drc": staged_drc,
+        "baseline_drc": baseline_drc,
+        "initial_regressions": initial_regressions,
+        "regressions": final_regressions,
+        "artifacts": str(artifacts),
+        "candidate": str(artifacts / "staged.kicad_pcb"),
+        "diff": str(artifacts / "edit.diff"),
     }
 
 
@@ -1864,6 +1990,16 @@ def build_parser() -> argparse.ArgumentParser:
     place_power_loops.add_argument("--yes", action="store_true")
     place_power_loops.add_argument("--artifacts", default="", metavar="DIR")
     place_power_loops.add_argument("--format", choices=("json", "jsonl"), default="json")
+
+    clean_silk = subcommands.add_parser(
+        "clean-silk",
+        help="remove new candidate silk regressions without moving footprint roots",
+    )
+    clean_silk.add_argument("--board-candidate", required=True, metavar="FILE")
+    clean_silk.add_argument("--baseline-candidate", required=True, metavar="FILE")
+    clean_silk.add_argument("--yes", action="store_true", help="confirm candidate-only cleanup")
+    clean_silk.add_argument("--artifacts", required=True, metavar="DIR")
+    clean_silk.add_argument("--format", choices=("json",), default="json")
     return parser
 
 
@@ -2151,6 +2287,30 @@ def main(argv: Sequence[str] | None = None) -> None:
                 print(json.dumps(result, indent=2, sort_keys=True))
             else:
                 print(format_circuit_spec_arrangement(result))
+            return
+        if args.command == "clean-silk":
+            if args.mode not in {"write", "experimental"}:
+                raise ValueError("clean-silk requires --mode write or --mode experimental")
+            if not args.yes:
+                raise ValueError("clean-silk requires --yes after reviewing candidate inputs")
+            project_root = Path(args.project_dir or ".").expanduser().resolve()
+            candidate_path = Path(args.board_candidate).expanduser()
+            baseline_path = Path(args.baseline_candidate).expanduser()
+            if not candidate_path.is_absolute():
+                candidate_path = project_root / candidate_path
+            if not baseline_path.is_absolute():
+                baseline_path = project_root / baseline_path
+            report = _run_offline_silk_cleanup(
+                root=project_root,
+                baseline_content=baseline_path.read_text(encoding="utf-8"),
+                candidate_content=candidate_path.read_text(encoding="utf-8"),
+                artifacts=Path(args.artifacts).expanduser().resolve(),
+                baseline_source=str(baseline_path),
+                candidate_source=str(candidate_path),
+            )
+            print(json.dumps(report, indent=2, sort_keys=True))
+            if report["status"] == "rejected":
+                raise SystemExit(3)
             return
         if args.command == "power-loops":
             project_root = Path(args.project_dir or ".").expanduser().resolve()

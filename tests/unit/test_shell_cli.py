@@ -25,6 +25,7 @@ from kicad_mcp.deep_inspection import (
 )
 from kicad_mcp.shell_cli import (
     _apply_footprint_batch_to_board_content,
+    _demote_reference_fields_to_fab,
     _drc_regression_details,
     _emit_records,
     _erc_finding_keys,
@@ -41,6 +42,27 @@ from kicad_mcp.shell_cli import (
     run_native_board_transaction,
 )
 from kicad_mcp.tools.board_file import _courtyard_polygons_from_block
+
+
+def test_silk_cleanup_demotes_reference_without_moving_footprint_root() -> None:
+    board = """(kicad_pcb
+      (footprint "C_0603"
+        (layer "F.Cu")
+        (at 12.5 34.5 90)
+        (property "Reference" "C1"
+          (at 0 -1.5 0)
+          (layer "F.SilkS")
+          (effects (font (size 1 1))))
+        (property "Value" "100nF"
+          (at 0 1.5 0)
+          (layer "F.Fab")
+          (effects (font (size 1 1))))))"""
+
+    cleaned = _demote_reference_fields_to_fab(board, ["C1"])
+
+    assert cleaned.count('(layer "F.SilkS")') == 0
+    assert cleaned.count('(layer "F.Fab")') == 2
+    assert "(at 12.5 34.5 90)" in cleaned
 
 
 def test_concave_courtyard_is_preserved_as_one_polygon() -> None:

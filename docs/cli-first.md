@@ -230,6 +230,20 @@ it cannot be applied directly. Applying a planned power-loop refinement to an
 explicit candidate creates a second offline candidate transaction and never
 touches the saved/live board.
 
+`clean-silk` compares a refined candidate with an explicit baseline candidate,
+finds only newly offending `Reference` fields in KiCad's DRC relations, and
+demotes those labels from `F.SilkS` to `F.Fab`. It verifies that no footprint root
+transform changed and requires the cleaned result to pass the baseline DRC
+regression gate.
+
+```bash
+kicadq -C ./board --mode write clean-silk \
+  --baseline-candidate output/floorplan/staged.kicad_pcb \
+  --board-candidate output/power-refined/staged.kicad_pcb \
+  --artifacts output/silk-cleaned --yes |
+  jq '{status,candidate_verified,demoted_reference_fields,candidate}'
+```
+
 An apply request never writes optimistically. It first constructs an offline
 candidate from the saved board, verifies every requested root transform and all
 rigid footprint children, and runs exact `kicad-cli` DRC. With synchronized native
