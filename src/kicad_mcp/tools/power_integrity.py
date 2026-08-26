@@ -49,6 +49,7 @@ from ..utils.solver_seams import (
 from ..utils.thermal_solver import ThermalPlaneSpec, solve_plane_temperature
 from ..utils.units import mm_to_mil, mm_to_nm, nm_to_mm
 from ..verdicts import three_level_verdict, warn_max_from
+from .metadata import headless_compatible
 
 _COPPER_RESISTIVITY_OHM_M = 1.724e-8
 _TEMPERATURE_COEFFICIENT = 0.0039
@@ -217,6 +218,31 @@ def _zone_already_exists(net_name: str, layer: BoardLayer.ValueType) -> bool:
 
 def register(mcp: FastMCP) -> None:
     """Register power-integrity and thermal tools."""
+
+    @mcp.tool()
+    @headless_compatible
+    def pcb_get_power_loop_report(ic_ref: str = "") -> dict[str, object]:
+        """Audit declared decouplers using actual rail-pad and ground-pad geometry.
+
+        Unlike origin-distance heuristics, this checks every capacitor in the
+        saved project design intent, identifies the shared non-ground rail, and
+        reports nearest same-net pad distance plus a forward+ground-return loop
+        proxy. Set ``ic_ref`` to inspect one host IC. Routed copper is not yet
+        included, so rerun after routing for the final physical-loop review.
+        """
+        from ..deep_inspection import power_loop_report, project_snapshot
+        from .design_intent_state import resolve_design_intent
+
+        intent = resolve_design_intent().resolved
+        pairs = [pair.model_dump(mode="json") for pair in intent.decoupling_pairs]
+        return cast(
+            dict[str, object],
+            power_loop_report(
+                project_snapshot(get_config().project_root),
+                pairs,
+                reference=ic_ref,
+            ),
+        )
 
     @mcp.tool()
     def pdn_calculate_voltage_drop(

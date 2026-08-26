@@ -98,6 +98,8 @@ uv run kicadq -C ./board backend | jq '.authorities,.policy'
 uv run kicadq -C ./board prove --sheet Power | jq '.summary,.pins[]'
 uv run kicadq -C ./board verify --sheet Power --artifacts build/verify | jq '.status'
 uv run kicadq -C ./board map --zoom 3 --width 120
+uv run kicadq -C ./board power-loops --ref U1 | jq '.groups[] | {ic_ref,status,members}'
+uv run kicadq -C ./board place-power-loops --ref U1 | jq '.placements'
 uv run kicadq -C ./board plan-rewire --sheet LTE --ref C15 --ref R11 --format json | jq '.operations'
 uv run kicadq -C ./board place --fix J1 | jq '.placements'
 ```

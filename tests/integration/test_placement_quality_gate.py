@@ -185,7 +185,7 @@ async def test_pcb_placement_quality_gate_fails_decoupling_distance(
     gate = await call_tool_text(server, "pcb_placement_quality_gate", {})
 
     assert "Placement quality gate: FAIL" in gate
-    assert "nearest decoupling cap is" in gate
+    assert "U1/C1: no shared non-ground pad net" in gate
 
 
 @pytest.mark.anyio
@@ -252,6 +252,7 @@ async def test_pcb_placement_quality_gate_passes_clean_intent_aware_board(
             name="Capacitor_SMD:C_0603",
             width_mm=2.0,
             height_mm=1.2,
+            net_name="USB_DP",
         ),
     )
     server = build_server("full")

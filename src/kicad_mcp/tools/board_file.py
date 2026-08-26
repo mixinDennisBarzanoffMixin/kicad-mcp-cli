@@ -130,6 +130,165 @@ def _bbox_extents_from_block(block: str) -> tuple[float, float, float, float]:
     return min(xs), min(ys), max(xs), max(ys)
 
 
+def _body_bbox_extents_from_block(block: str) -> tuple[float, float, float, float]:
+    """Return the physical body/pad extents without antenna keepout geometry.
+
+    Some RF-module footprints encode a large concave antenna courtyard in the
+    footprint itself. Its axis-aligned bounding box is useful for conservative
+    edge checks but makes ordinary body collision and spring placement wildly
+    pessimistic. F.Fab/B.Fab plus pads gives a separate component-body proxy;
+    the antenna region remains governed by its real KiCad keepout and DRC.
+    """
+    xs: list[float] = []
+    ys: list[float] = []
+    for keyword in ("fp_rect", "fp_line", "fp_circle"):
+        for graphic in _iter_blocks(block, keyword):
+            layer_match = re.search(r'\(layer\s+"([FB]\.Fab)"\)', graphic)
+            if layer_match is None:
+                continue
+            if keyword in {"fp_rect", "fp_line"}:
+                points = re.search(
+                    rf"\(start\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})\).*?"
+                    rf"\(end\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})\)",
+                    graphic,
+                    flags=re.DOTALL,
+                )
+                if points:
+                    xs.extend([float(points.group(1)), float(points.group(3))])
+                    ys.extend([float(points.group(2)), float(points.group(4))])
+            else:
+                circle = re.search(
+                    rf"\(center\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})\).*?"
+                    rf"\(end\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})\)",
+                    graphic,
+                    flags=re.DOTALL,
+                )
+                if circle:
+                    center_x = float(circle.group(1))
+                    center_y = float(circle.group(2))
+                    radius = math.hypot(
+                        float(circle.group(3)) - center_x,
+                        float(circle.group(4)) - center_y,
+                    )
+                    xs.extend([center_x - radius, center_x + radius])
+                    ys.extend([center_y - radius, center_y + radius])
+
+    if not xs or not ys:
+        return _bbox_extents_from_block(block)
+
+    for pad_block in _iter_blocks(block, "pad"):
+        at_match = re.search(
+            rf"\(at\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})(?:\s+({FLOAT_PATTERN}))?\)",
+            pad_block,
+        )
+        size_match = re.search(rf"\(size\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})\)", pad_block)
+        if not (at_match and size_match):
+            continue
+        center_x = float(at_match.group(1))
+        center_y = float(at_match.group(2))
+        half_width = float(size_match.group(1)) / 2.0
+        half_height = float(size_match.group(2)) / 2.0
+        angle = math.radians(float(at_match.group(3) or 0.0))
+        rotated_half_width = abs(half_width * math.cos(angle)) + abs(
+            half_height * math.sin(angle)
+        )
+        rotated_half_height = abs(half_width * math.sin(angle)) + abs(
+            half_height * math.cos(angle)
+        )
+        xs.extend([center_x - rotated_half_width, center_x + rotated_half_width])
+        ys.extend([center_y - rotated_half_height, center_y + rotated_half_height])
+
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _courtyard_polygons_from_block(block: str) -> list[list[list[float]]]:
+    """Return closed local courtyard polygons without flattening concave outlines.
+
+    KiCad library footprints commonly encode courtyards as either ``fp_rect``
+    primitives or an unordered set of connected ``fp_line`` segments.  Keeping
+    those loops is important for RF modules whose courtyard is T-shaped: one
+    axis-aligned bounding box falsely occupies the empty space beside the body,
+    while an F.Fab-only proxy permits real courtyard overlaps.
+    """
+    polygons: list[list[list[float]]] = []
+    for rect in _iter_blocks(block, "fp_rect"):
+        if re.search(r'\(layer\s+"[FB]\.CrtYd"\)', rect) is None:
+            continue
+        points = re.search(
+            rf"\(start\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})\).*?"
+            rf"\(end\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})\)",
+            rect,
+            flags=re.DOTALL,
+        )
+        if points is None:
+            continue
+        x1, y1, x2, y2 = (float(points.group(index)) for index in range(1, 5))
+        polygons.append([[x1, y1], [x2, y1], [x2, y2], [x1, y2]])
+
+    for poly in _iter_blocks(block, "fp_poly"):
+        if re.search(r'\(layer\s+"[FB]\.CrtYd"\)', poly) is None:
+            continue
+        points_match = re.search(r"\(pts\s+(.*?)\)\s*\(stroke", poly, flags=re.DOTALL)
+        if points_match is None:
+            continue
+        points = [
+            [float(match.group(1)), float(match.group(2))]
+            for match in re.finditer(
+                rf"\(xy\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})\)",
+                points_match.group(1),
+            )
+        ]
+        if len(points) >= 3:
+            polygons.append(points)
+
+    def key(point: tuple[float, float]) -> tuple[float, float]:
+        return round(point[0], 6), round(point[1], 6)
+
+    segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
+    for line in _iter_blocks(block, "fp_line"):
+        if re.search(r'\(layer\s+"[FB]\.CrtYd"\)', line) is None:
+            continue
+        points = re.search(
+            rf"\(start\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})\).*?"
+            rf"\(end\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})\)",
+            line,
+            flags=re.DOTALL,
+        )
+        if points is not None:
+            segments.append(
+                (
+                    key((float(points.group(1)), float(points.group(2)))),
+                    key((float(points.group(3)), float(points.group(4)))),
+                )
+            )
+
+    unused = set(range(len(segments)))
+    while unused:
+        segment_index = min(unused)
+        unused.remove(segment_index)
+        start, current = segments[segment_index]
+        loop = [start, current]
+        while current != start:
+            next_index = next(
+                (
+                    index
+                    for index in sorted(unused)
+                    if current in segments[index]
+                ),
+                None,
+            )
+            if next_index is None:
+                break
+            unused.remove(next_index)
+            left, right = segments[next_index]
+            current = right if left == current else left
+            loop.append(current)
+        if len(loop) >= 4 and loop[-1] == start:
+            polygons.append([[point[0], point[1]] for point in loop[:-1]])
+
+    return polygons
+
+
 def _bbox_from_block(block: str) -> tuple[float, float]:
     min_x, min_y, max_x, max_y = _bbox_extents_from_block(block)
 
@@ -175,6 +334,9 @@ def _parse_board_footprint_blocks(content: str) -> dict[str, dict[str, Any]]:
                     if ref_match and name_match:
                         root_at = _parse_root_at(block)
                         min_x, min_y, max_x, max_y = _bbox_extents_from_block(block)
+                        body_min_x, body_min_y, body_max_x, body_max_y = (
+                            _body_bbox_extents_from_block(block)
+                        )
                         width_mm = max(max_x - min_x, 1.0)
                         height_mm = max(max_y - min_y, 1.0)
                         layer_match = re.search(r'\(layer\s+"([^"]+)"\)', block)
@@ -195,6 +357,13 @@ def _parse_board_footprint_blocks(content: str) -> dict[str, dict[str, Any]]:
                             "bbox_max_y_mm": round(max_y, 4),
                             "bbox_center_x_mm": round((min_x + max_x) / 2.0, 4),
                             "bbox_center_y_mm": round((min_y + max_y) / 2.0, 4),
+                            "body_bbox_min_x_mm": round(body_min_x, 4),
+                            "body_bbox_min_y_mm": round(body_min_y, 4),
+                            "body_bbox_max_x_mm": round(body_max_x, 4),
+                            "body_bbox_max_y_mm": round(body_max_y, 4),
+                            "body_width_mm": round(max(body_max_x - body_min_x, 1.0), 4),
+                            "body_height_mm": round(max(body_max_y - body_min_y, 1.0), 4),
+                            "courtyard_polygons": _courtyard_polygons_from_block(block),
                             "layer_name": layer_match.group(1) if layer_match else "F.Cu",
                             "net_names": _footprint_net_names(block),
                             "pad_nets": _footprint_pad_net_map(block),

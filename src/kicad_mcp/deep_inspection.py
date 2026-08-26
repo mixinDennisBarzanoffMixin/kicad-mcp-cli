@@ -7,6 +7,7 @@ emits ordinary Python/JSON values for shell pipelines.
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
@@ -333,6 +334,754 @@ def _pad_positions(footprint: JsonRecord) -> list[JsonRecord]:
             }
         )
     return pads
+
+
+_GROUND_NET_NAMES = {"GND", "GNDA", "GNDD", "VSS", "VSSA", "VSSD", "PGND", "AGND"}
+
+
+def _is_ground_net(net_name: str) -> bool:
+    """Return whether a net name is an intentional current-return rail."""
+    normalized = net_name.strip().upper().rsplit("/", 1)[-1]
+    return normalized in _GROUND_NET_NAMES or normalized.endswith("_GND")
+
+
+def _is_actionable_pad_net(net_name: str) -> bool:
+    normalized = net_name.strip().casefold()
+    return bool(normalized) and not normalized.startswith("unconnected-(") and normalized not in {
+        "nc",
+        "n/c",
+        "no_connect",
+    }
+
+
+def _closest_pad_pair(
+    left_pads: Iterable[JsonRecord],
+    right_pads: Iterable[JsonRecord],
+) -> JsonRecord | None:
+    """Return the shortest same-net pad-center pair and its physical distance."""
+    best: JsonRecord | None = None
+    for left in left_pads:
+        left_net = str(left.get("net", ""))
+        if not _is_actionable_pad_net(left_net):
+            continue
+        for right in right_pads:
+            if str(right.get("net", "")) != left_net:
+                continue
+            left_at = list(left.get("at", []))
+            right_at = list(right.get("at", []))
+            if len(left_at) != 2 or len(right_at) != 2:
+                continue
+            dx_mm = float(right_at[0]) - float(left_at[0])
+            dy_mm = float(right_at[1]) - float(left_at[1])
+            distance_mm = math.hypot(dx_mm, dy_mm)
+            candidate: JsonRecord = {
+                "net": left_net,
+                "host_pad": str(left.get("number", "")),
+                "cap_pad": str(right.get("number", "")),
+                "host_at_mm": [round(float(left_at[0]), 4), round(float(left_at[1]), 4)],
+                "cap_at_mm": [round(float(right_at[0]), 4), round(float(right_at[1]), 4)],
+                "dx_mm": round(dx_mm, 4),
+                "dy_mm": round(dy_mm, 4),
+                "distance_mm": round(distance_mm, 4),
+                "manhattan_mm": round(abs(dx_mm) + abs(dy_mm), 4),
+            }
+            if best is None or float(candidate["distance_mm"]) < float(best["distance_mm"]):
+                best = candidate
+    return best
+
+
+def power_loop_report(
+    snapshot: JsonRecord,
+    decoupling_pairs: Iterable[JsonRecord],
+    *,
+    reference: str = "",
+) -> JsonRecord:
+    """Inspect every declared decoupler using actual same-net pad coordinates.
+
+    Forward distance is the nearest host-power-pad to capacitor-pad distance on
+    the same rail. Return distance is the corresponding ground-pad distance.
+    Their sum is a simple current-loop proxy, not a routed-copper sign-off.
+    """
+    footprints = {
+        str(item.get("reference", "")): item
+        for item in snapshot.get("board", {}).get("footprints", [])
+        if item.get("reference")
+    }
+    groups: list[JsonRecord] = []
+    checked_caps = 0
+    passing_caps = 0
+    missing_refs: set[str] = set()
+
+    for raw_pair in decoupling_pairs:
+        host_ref = str(raw_pair.get("ic_ref", ""))
+        if reference and host_ref != reference:
+            continue
+        max_distance_mm = float(raw_pair.get("max_distance_mm", 3.0))
+        host = footprints.get(host_ref)
+        members: list[JsonRecord] = []
+        if host is None:
+            missing_refs.add(host_ref)
+        host_pads = list(host.get("pads", [])) if host else []
+        host_signal_pads = [
+            pad for pad in host_pads if not _is_ground_net(str(pad.get("net", "")))
+        ]
+        host_ground_pads = [
+            pad for pad in host_pads if _is_ground_net(str(pad.get("net", "")))
+        ]
+
+        for cap_ref_value in raw_pair.get("cap_refs", []):
+            cap_ref = str(cap_ref_value)
+            cap = footprints.get(cap_ref)
+            checked_caps += 1
+            if cap is None or host is None:
+                if cap is None:
+                    missing_refs.add(cap_ref)
+                members.append(
+                    {
+                        "reference": cap_ref,
+                        "status": "missing",
+                        "reason": (
+                            "host footprint is missing"
+                            if host is None
+                            else "capacitor is missing"
+                        ),
+                    }
+                )
+                continue
+
+            cap_pads = list(cap.get("pads", []))
+            cap_signal_pads = [
+                pad for pad in cap_pads if not _is_ground_net(str(pad.get("net", "")))
+            ]
+            cap_ground_pads = [
+                pad for pad in cap_pads if _is_ground_net(str(pad.get("net", "")))
+            ]
+            forward = _closest_pad_pair(host_signal_pads, cap_signal_pads)
+            return_path = _closest_pad_pair(host_ground_pads, cap_ground_pads)
+            origin_distance_mm = math.hypot(
+                float(cap.get("x_mm") or 0.0) - float(host.get("x_mm") or 0.0),
+                float(cap.get("y_mm") or 0.0) - float(host.get("y_mm") or 0.0),
+            )
+            if forward is None:
+                status = "fail"
+                reason = "no shared non-ground pad net"
+            elif float(forward["distance_mm"]) > max_distance_mm:
+                status = "fail"
+                reason = (
+                    f"power-pad distance {float(forward['distance_mm']):.2f} mm exceeds "
+                    f"{max_distance_mm:.2f} mm"
+                )
+            else:
+                status = "pass"
+                reason = "power-pad distance is within the declared limit"
+                passing_caps += 1
+            loop_proxy_mm = (
+                round(float(forward["distance_mm"]) + float(return_path["distance_mm"]), 4)
+                if forward is not None and return_path is not None
+                else None
+            )
+            members.append(
+                {
+                    "reference": cap_ref,
+                    "value": str(cap.get("value", "")),
+                    "status": status,
+                    "reason": reason,
+                    "origin_distance_mm": round(origin_distance_mm, 4),
+                    "forward": forward,
+                    "return": return_path,
+                    "loop_proxy_mm": loop_proxy_mm,
+                }
+            )
+
+        group_status = (
+            "pass"
+            if members and all(item["status"] == "pass" for item in members)
+            else "fail"
+        )
+        groups.append(
+            {
+                "host_reference": host_ref,
+                "host_value": str(host.get("value", "")) if host else "",
+                "status": group_status,
+                "max_power_pad_distance_mm": max_distance_mm,
+                "members": members,
+                "counts": {
+                    "capacitors": len(members),
+                    "passing": sum(item["status"] == "pass" for item in members),
+                    "failing": sum(item["status"] != "pass" for item in members),
+                },
+            }
+        )
+
+    failing_caps = checked_caps - passing_caps
+    return {
+        "schema_version": "1.0",
+        "status": "pass" if groups and failing_caps == 0 else "fail",
+        "authority": "saved-board-pad-geometry",
+        "measurement": {
+            "forward": "nearest same-net host-pad to capacitor-pad center distance",
+            "return": "nearest ground-pad center distance",
+            "loop_proxy": "forward distance plus return distance; routed copper not yet considered",
+        },
+        "summary": {
+            "groups": len(groups),
+            "capacitors": checked_caps,
+            "passing": passing_caps,
+            "failing": failing_caps,
+            "missing_references": sorted(missing_refs),
+        },
+        "groups": groups,
+    }
+
+
+def format_power_loop_report(report: JsonRecord) -> str:
+    """Render a compact terminal report while preserving JSON as authority."""
+    summary = report["summary"]
+    lines = [
+        f"POWER LOOPS {str(report['status']).upper()} | "
+        f"groups={summary['groups']} caps={summary['capacitors']} "
+        f"pass={summary['passing']} fail={summary['failing']}",
+        "distance = actual same-net pad centers; loop = forward + GND return proxy",
+    ]
+    for group in report["groups"]:
+        lines.append(
+            f"{group['host_reference']} {str(group['status']).upper()} "
+            f"limit={float(group['max_power_pad_distance_mm']):.2f}mm"
+        )
+        for member in group["members"]:
+            forward = member.get("forward")
+            if forward is None:
+                lines.append(
+                    f"  {member['reference']}: {str(member['status']).upper()} — {member['reason']}"
+                )
+                continue
+            loop = member.get("loop_proxy_mm")
+            loop_text = f" loop={float(loop):.2f}mm" if loop is not None else " loop=n/a"
+            lines.append(
+                f"  {member['reference']} {str(member['status']).upper()} "
+                f"{forward['net']} {forward['host_pad']}→{forward['cap_pad']} "
+                f"forward={float(forward['distance_mm']):.2f}mm{loop_text}"
+            )
+    return "\n".join(lines)
+
+
+def _rotate_local_offset(x_mm: float, y_mm: float, rotation_deg: float) -> tuple[float, float]:
+    angle = math.radians(rotation_deg)
+    return (
+        x_mm * math.cos(angle) + y_mm * math.sin(angle),
+        -x_mm * math.sin(angle) + y_mm * math.cos(angle),
+    )
+
+
+def _pad_local_offset(footprint: JsonRecord, pad: JsonRecord) -> tuple[float, float]:
+    """Recover one pad's unrotated local offset from saved world geometry."""
+    root_x = float(footprint.get("x_mm") or 0.0)
+    root_y = float(footprint.get("y_mm") or 0.0)
+    pad_at = list(pad.get("at", []))
+    dx_mm = float(pad_at[0]) - root_x
+    dy_mm = float(pad_at[1]) - root_y
+    angle = math.radians(float(footprint.get("rotation") or 0.0))
+    return (
+        dx_mm * math.cos(angle) - dy_mm * math.sin(angle),
+        dx_mm * math.sin(angle) + dy_mm * math.cos(angle),
+    )
+
+
+def _footprint_bounds_for_transform(
+    footprint: JsonRecord,
+    x_mm: float,
+    y_mm: float,
+    rotation_deg: float,
+    *,
+    margin_mm: float = 0.0,
+    body_only: bool = False,
+) -> tuple[float, float, float, float]:
+    min_x_key = "body_bbox_min_x_mm" if body_only else "bbox_min_x_mm"
+    min_y_key = "body_bbox_min_y_mm" if body_only else "bbox_min_y_mm"
+    max_x_key = "body_bbox_max_x_mm" if body_only else "bbox_max_x_mm"
+    max_y_key = "body_bbox_max_y_mm" if body_only else "bbox_max_y_mm"
+    min_x = float(
+        footprint.get(
+            min_x_key,
+            footprint.get("bbox_min_x_mm", -float(footprint.get("width_mm", 1.0)) / 2.0),
+        )
+    )
+    min_y = float(
+        footprint.get(
+            min_y_key,
+            footprint.get("bbox_min_y_mm", -float(footprint.get("height_mm", 1.0)) / 2.0),
+        )
+    )
+    max_x = float(
+        footprint.get(
+            max_x_key,
+            footprint.get("bbox_max_x_mm", float(footprint.get("width_mm", 1.0)) / 2.0),
+        )
+    )
+    max_y = float(
+        footprint.get(
+            max_y_key,
+            footprint.get("bbox_max_y_mm", float(footprint.get("height_mm", 1.0)) / 2.0),
+        )
+    )
+    corners = [
+        _rotate_local_offset(local_x, local_y, rotation_deg)
+        for local_x, local_y in (
+            (min_x, min_y),
+            (min_x, max_y),
+            (max_x, min_y),
+            (max_x, max_y),
+        )
+    ]
+    xs = [x_mm + point[0] for point in corners]
+    ys = [y_mm + point[1] for point in corners]
+    return (
+        min(xs) - margin_mm,
+        min(ys) - margin_mm,
+        max(xs) + margin_mm,
+        max(ys) + margin_mm,
+    )
+
+
+def _rectangles_overlap(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+) -> bool:
+    return not (
+        left[2] <= right[0]
+        or left[0] >= right[2]
+        or left[3] <= right[1]
+        or left[1] >= right[3]
+    )
+
+
+def _transform_courtyard_polygons(
+    footprint: JsonRecord,
+    x_mm: float,
+    y_mm: float,
+    rotation_deg: float,
+    *,
+    margin_mm: float = 0.0,
+) -> list[list[tuple[float, float]]]:
+    """Return world-space courtyard loops, falling back to the parsed bounds."""
+    raw_polygons = footprint.get("courtyard_polygons")
+    polygons: list[list[tuple[float, float]]] = []
+    if isinstance(raw_polygons, list):
+        for raw_polygon in raw_polygons:
+            if not isinstance(raw_polygon, list) or len(raw_polygon) < 3:
+                continue
+            polygon: list[tuple[float, float]] = []
+            for raw_point in raw_polygon:
+                if not isinstance(raw_point, list) or len(raw_point) != 2:
+                    polygon = []
+                    break
+                offset_x, offset_y = _rotate_local_offset(
+                    float(raw_point[0]), float(raw_point[1]), rotation_deg
+                )
+                polygon.append((x_mm + offset_x, y_mm + offset_y))
+            if polygon:
+                polygons.append(polygon)
+    if polygons and margin_mm <= 0.0:
+        return polygons
+    # A true polygon offset is deliberately not approximated by moving each
+    # vertex away from the centroid: that fails for concave courtyards.  When
+    # the caller requests extra clearance, use the conservative expanded
+    # bounding rectangle instead.
+    min_x, min_y, max_x, max_y = _footprint_bounds_for_transform(
+        footprint,
+        x_mm,
+        y_mm,
+        rotation_deg,
+        margin_mm=margin_mm,
+    )
+    return [[(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)]]
+
+
+def _polygon_bounds(polygon: list[tuple[float, float]]) -> tuple[float, float, float, float]:
+    xs = [point[0] for point in polygon]
+    ys = [point[1] for point in polygon]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _point_on_segment(
+    point: tuple[float, float],
+    start: tuple[float, float],
+    end: tuple[float, float],
+    *,
+    epsilon: float = 1e-9,
+) -> bool:
+    cross = (point[1] - start[1]) * (end[0] - start[0]) - (
+        point[0] - start[0]
+    ) * (end[1] - start[1])
+    if abs(cross) > epsilon:
+        return False
+    return (
+        min(start[0], end[0]) - epsilon <= point[0] <= max(start[0], end[0]) + epsilon
+        and min(start[1], end[1]) - epsilon <= point[1] <= max(start[1], end[1]) + epsilon
+    )
+
+
+def _polygon_segments_intersect(
+    first_start: tuple[float, float],
+    first_end: tuple[float, float],
+    second_start: tuple[float, float],
+    second_end: tuple[float, float],
+) -> bool:
+    def orientation(
+        left: tuple[float, float],
+        middle: tuple[float, float],
+        right: tuple[float, float],
+    ) -> float:
+        return (middle[1] - left[1]) * (right[0] - middle[0]) - (
+            middle[0] - left[0]
+        ) * (right[1] - middle[1])
+
+    values = (
+        orientation(first_start, first_end, second_start),
+        orientation(first_start, first_end, second_end),
+        orientation(second_start, second_end, first_start),
+        orientation(second_start, second_end, first_end),
+    )
+    if values[0] * values[1] < 0.0 and values[2] * values[3] < 0.0:
+        return True
+    return any(
+        abs(value) <= 1e-9 and _point_on_segment(point, segment_start, segment_end)
+        for value, point, segment_start, segment_end in (
+            (values[0], second_start, first_start, first_end),
+            (values[1], second_end, first_start, first_end),
+            (values[2], first_start, second_start, second_end),
+            (values[3], first_end, second_start, second_end),
+        )
+    )
+
+
+def _point_in_polygon(point: tuple[float, float], polygon: list[tuple[float, float]]) -> bool:
+    inside = False
+    for index, start in enumerate(polygon):
+        end = polygon[(index + 1) % len(polygon)]
+        if _point_on_segment(point, start, end):
+            return True
+        if (start[1] > point[1]) != (end[1] > point[1]):
+            x_intersection = (end[0] - start[0]) * (point[1] - start[1]) / (
+                end[1] - start[1]
+            ) + start[0]
+            if point[0] < x_intersection:
+                inside = not inside
+    return inside
+
+
+def _polygons_overlap(
+    left: list[tuple[float, float]],
+    right: list[tuple[float, float]],
+) -> bool:
+    if not _rectangles_overlap(_polygon_bounds(left), _polygon_bounds(right)):
+        return False
+    for left_index, left_start in enumerate(left):
+        left_end = left[(left_index + 1) % len(left)]
+        for right_index, right_start in enumerate(right):
+            right_end = right[(right_index + 1) % len(right)]
+            if _polygon_segments_intersect(left_start, left_end, right_start, right_end):
+                return True
+    return _point_in_polygon(left[0], right) or _point_in_polygon(right[0], left)
+
+
+def power_loop_placement_plan(
+    snapshot: JsonRecord,
+    decoupling_pairs: Iterable[JsonRecord],
+    *,
+    reference: str = "",
+    grid_mm: float = 0.25,
+    courtyard_margin_mm: float = 0.0,
+) -> JsonRecord:
+    """Plan capacitor root transforms around matching host power pads.
+
+    This is intentionally a dry-run geometry proposal. It considers all four
+    orthogonal capacitor rotations, keeps other footprints collision-free by
+    courtyard proxy, and minimizes the forward-plus-ground-return distance.
+    KiCad DRC remains the final acceptance authority when the plan is applied.
+    """
+    if grid_mm <= 0.0:
+        raise ValueError("grid_mm must be greater than zero")
+    pair_list = [dict(pair) for pair in decoupling_pairs]
+    before = power_loop_report(snapshot, pair_list, reference=reference)
+    footprints = {
+        str(item.get("reference", "")): item
+        for item in snapshot.get("board", {}).get("footprints", [])
+        if item.get("reference")
+    }
+    board_bounds_raw = snapshot.get("board", {}).get("bounds_mm")
+    if not isinstance(board_bounds_raw, list) or len(board_bounds_raw) != 4:
+        return {
+            "schema_version": "1.0",
+            "status": "blocked",
+            "reason": "board has no rectangular Edge.Cuts bounds",
+            "placements": [],
+            "before": before,
+        }
+    board_bounds = tuple(float(value) for value in board_bounds_raw)
+    failing_refs = {
+        str(member["reference"])
+        for group in before["groups"]
+        for member in group["members"]
+        if member["status"] != "pass"
+    }
+    occupied: list[tuple[str, list[list[tuple[float, float]]]]] = []
+    for footprint_ref, footprint in footprints.items():
+        if footprint_ref in failing_refs:
+            continue
+        occupied.append(
+            (
+                footprint_ref,
+                _transform_courtyard_polygons(
+                    footprint,
+                    float(footprint.get("x_mm") or 0.0),
+                    float(footprint.get("y_mm") or 0.0),
+                    float(footprint.get("rotation") or 0.0),
+                ),
+            )
+        )
+
+    placements: list[JsonRecord] = []
+    unresolved: list[JsonRecord] = []
+    group_by_host = {str(group["host_reference"]): group for group in before["groups"]}
+    for pair in pair_list:
+        host_ref = str(pair.get("ic_ref", ""))
+        if reference and host_ref != reference:
+            continue
+        host = footprints.get(host_ref)
+        group = group_by_host.get(host_ref)
+        if host is None or group is None:
+            unresolved.append({"reference": host_ref, "reason": "host footprint is missing"})
+            continue
+        member_by_ref = {str(member["reference"]): member for member in group["members"]}
+        max_distance_mm = float(pair.get("max_distance_mm", 3.0))
+        host_pads = list(host.get("pads", []))
+        host_ground_pads = [
+            pad for pad in host_pads if _is_ground_net(str(pad.get("net", "")))
+        ]
+
+        ordered_cap_refs = sorted(
+            (str(value) for value in pair.get("cap_refs", [])),
+            key=lambda cap_ref: -(
+                float(footprints.get(cap_ref, {}).get("width_mm", 0.0))
+                * float(footprints.get(cap_ref, {}).get("height_mm", 0.0))
+            ),
+        )
+        for cap_ref in ordered_cap_refs:
+            member = member_by_ref.get(cap_ref)
+            if member is not None and member.get("status") == "pass":
+                continue
+            cap = footprints.get(cap_ref)
+            if cap is None or member is None or member.get("forward") is None:
+                unresolved.append(
+                    {
+                        "reference": cap_ref,
+                        "host_reference": host_ref,
+                        "reason": str(member.get("reason", "capacitor is missing"))
+                        if member
+                        else "capacitor is missing",
+                    }
+                )
+                continue
+            rail = str(member["forward"]["net"])
+            matching_host_pads = [pad for pad in host_pads if str(pad.get("net", "")) == rail]
+            cap_pads = list(cap.get("pads", []))
+            matching_cap_pads = [pad for pad in cap_pads if str(pad.get("net", "")) == rail]
+            cap_ground_pads = [
+                pad for pad in cap_pads if _is_ground_net(str(pad.get("net", "")))
+            ]
+            candidates: list[
+                tuple[float, JsonRecord, list[list[tuple[float, float]]]]
+            ] = []
+            for host_pad in matching_host_pads:
+                host_at = list(host_pad.get("at", []))
+                outward_x = float(host_at[0]) - float(host.get("x_mm") or 0.0)
+                outward_y = float(host_at[1]) - float(host.get("y_mm") or 0.0)
+                base_angle = math.atan2(outward_y, outward_x) if outward_x or outward_y else 0.0
+                angle_offsets = (0, 45, -45, 90, -90, 135, -135, 180)
+                radius_steps = max(1, int(math.floor(max_distance_mm / grid_mm)))
+                radii = [
+                    max(1.25, grid_mm * step)
+                    for step in range(1, radius_steps + 1)
+                    if max(1.25, grid_mm * step) <= max_distance_mm
+                ]
+                radii = sorted(set(round(value, 6) for value in radii))
+                for rotation_deg in (0.0, 90.0, 180.0, 270.0):
+                    for cap_pad in matching_cap_pads:
+                        local_pad_x, local_pad_y = _pad_local_offset(cap, cap_pad)
+                        pad_offset_x, pad_offset_y = _rotate_local_offset(
+                            local_pad_x, local_pad_y, rotation_deg
+                        )
+                        for angle_offset in angle_offsets:
+                            angle = base_angle + math.radians(angle_offset)
+                            unit_x, unit_y = math.cos(angle), math.sin(angle)
+                            for radius_mm in radii:
+                                desired_pad_x = float(host_at[0]) + unit_x * radius_mm
+                                desired_pad_y = float(host_at[1]) + unit_y * radius_mm
+                                root_x = round((desired_pad_x - pad_offset_x) / grid_mm) * grid_mm
+                                root_y = round((desired_pad_y - pad_offset_y) / grid_mm) * grid_mm
+                                cap_pad_x = root_x + pad_offset_x
+                                cap_pad_y = root_y + pad_offset_y
+                                forward_mm = math.hypot(
+                                    cap_pad_x - float(host_at[0]),
+                                    cap_pad_y - float(host_at[1]),
+                                )
+                                if forward_mm > max_distance_mm + 1e-6:
+                                    continue
+                                bounds = _footprint_bounds_for_transform(
+                                    cap,
+                                    root_x,
+                                    root_y,
+                                    rotation_deg,
+                                    margin_mm=courtyard_margin_mm,
+                                )
+                                if (
+                                    bounds[0] < board_bounds[0]
+                                    or bounds[1] < board_bounds[1]
+                                    or bounds[2] > board_bounds[2]
+                                    or bounds[3] > board_bounds[3]
+                                ):
+                                    continue
+                                candidate_polygons = _transform_courtyard_polygons(
+                                    cap,
+                                    root_x,
+                                    root_y,
+                                    rotation_deg,
+                                    margin_mm=courtyard_margin_mm,
+                                )
+                                if any(
+                                    _polygons_overlap(candidate_polygon, occupied_polygon)
+                                    for _occupied_ref, occupied_polygons in occupied
+                                    for candidate_polygon in candidate_polygons
+                                    for occupied_polygon in occupied_polygons
+                                ):
+                                    continue
+                                return_mm: float | None = None
+                                for cap_ground_pad in cap_ground_pads:
+                                    local_ground = _pad_local_offset(cap, cap_ground_pad)
+                                    ground_offset = _rotate_local_offset(
+                                        *local_ground, rotation_deg
+                                    )
+                                    cap_ground_x = root_x + ground_offset[0]
+                                    cap_ground_y = root_y + ground_offset[1]
+                                    for host_ground_pad in host_ground_pads:
+                                        ground_at = list(host_ground_pad.get("at", []))
+                                        distance = math.hypot(
+                                            cap_ground_x - float(ground_at[0]),
+                                            cap_ground_y - float(ground_at[1]),
+                                        )
+                                        if return_mm is None or distance < return_mm:
+                                            return_mm = distance
+                                body_outward = (
+                                    (root_x - float(host_at[0])) * unit_x
+                                    + (root_y - float(host_at[1])) * unit_y
+                                )
+                                move_mm = math.hypot(
+                                    root_x - float(cap.get("x_mm") or 0.0),
+                                    root_y - float(cap.get("y_mm") or 0.0),
+                                )
+                                current_rotation = float(cap.get("rotation") or 0.0)
+                                rotation_delta = abs(
+                                    (rotation_deg - current_rotation + 180.0) % 360.0 - 180.0
+                                )
+                                score = (
+                                    forward_mm
+                                    + (return_mm if return_mm is not None else max_distance_mm)
+                                    + max(0.0, -body_outward) * 20.0
+                                    + move_mm * 0.002
+                                    # A rotation also swings reference/value fields and can
+                                    # create silkscreen regressions even when the copper and
+                                    # courtyard remain legal. Prefer the saved orientation
+                                    # unless rotation materially improves the electrical loop.
+                                    + (8.0 if rotation_delta > 1e-3 else 0.0)
+                                )
+                                candidates.append(
+                                    (
+                                        score,
+                                        {
+                                            "reference": cap_ref,
+                                            "host_reference": host_ref,
+                                            "rail": rail,
+                                            "from": [
+                                                float(cap.get("x_mm") or 0.0),
+                                                float(cap.get("y_mm") or 0.0),
+                                            ],
+                                            "to": [round(root_x, 4), round(root_y, 4)],
+                                            "from_rotation": float(cap.get("rotation") or 0.0),
+                                            "rotation": rotation_deg,
+                                            "host_pad": str(host_pad.get("number", "")),
+                                            "cap_pad": str(cap_pad.get("number", "")),
+                                            "forward_distance_mm": round(forward_mm, 4),
+                                            "return_distance_mm": (
+                                                round(return_mm, 4)
+                                                if return_mm is not None
+                                                else None
+                                            ),
+                                            "loop_proxy_mm": (
+                                                round(forward_mm + return_mm, 4)
+                                                if return_mm is not None
+                                                else None
+                                            ),
+                                        },
+                                        candidate_polygons,
+                                    )
+                                )
+            if not candidates:
+                unresolved.append(
+                    {
+                        "reference": cap_ref,
+                        "host_reference": host_ref,
+                        "rail": rail,
+                        "reason": "no in-bounds collision-free pad-aware candidate was found",
+                    }
+                )
+                continue
+            _score, selected, selected_polygons = min(
+                candidates,
+                key=lambda item: (
+                    item[0],
+                    float(item[1]["to"][1]),
+                    float(item[1]["to"][0]),
+                    float(item[1]["rotation"]),
+                ),
+            )
+            placements.append(selected)
+            occupied.append((cap_ref, selected_polygons))
+
+    proposed_snapshot = copy.deepcopy(snapshot)
+    proposed_by_ref = {
+        str(item.get("reference", "")): item
+        for item in proposed_snapshot.get("board", {}).get("footprints", [])
+    }
+    for placement in placements:
+        cap = proposed_by_ref[str(placement["reference"])]
+        new_x, new_y = (float(value) for value in placement["to"])
+        new_rotation = float(placement["rotation"])
+        for pad in cap.get("pads", []):
+            local_x, local_y = _pad_local_offset(cap, pad)
+            offset_x, offset_y = _rotate_local_offset(local_x, local_y, new_rotation)
+            pad["at"] = [round(new_x + offset_x, 4), round(new_y + offset_y, 4)]
+        cap["x_mm"] = new_x
+        cap["y_mm"] = new_y
+        cap["rotation"] = new_rotation
+    after = power_loop_report(proposed_snapshot, pair_list, reference=reference)
+    status = "planned" if not unresolved and after["status"] == "pass" else "blocked"
+    return {
+        "schema_version": "1.0",
+        "status": status,
+        "authority": "saved-board-pad-geometry",
+        "reason": (
+            "all declared failing capacitors received a pad-aware proposal"
+            if status == "planned"
+            else "one or more declared power-loop constraints remain unresolved"
+        ),
+        "grid_mm": grid_mm,
+        "courtyard_margin_mm": courtyard_margin_mm,
+        "placements": placements,
+        "unresolved": unresolved,
+        "before": before,
+        "after": after,
+    }
 
 
 def project_snapshot(project_dir: str | Path) -> JsonRecord:
@@ -704,6 +1453,18 @@ def _erc_evidence(schematic: Path, *, sheet: str = "") -> JsonRecord:
     }
 
 
+def _drc_finding_key(item: JsonRecord) -> str:
+    """Canonicalize a KiCad DRC finding independent of item reporting order."""
+    canonical = dict(item)
+    raw_items = canonical.get("items")
+    if isinstance(raw_items, list):
+        canonical["items"] = sorted(
+            raw_items,
+            key=lambda child: json.dumps(child, sort_keys=True, separators=(",", ":")),
+        )
+    return json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+
+
 def board_drc_evidence(project_dir: str | Path, *, board_content: str | None = None) -> JsonRecord:
     """Run KiCad DRC on saved or supplied serialized board state."""
     project, _schematic, board = _project_files(project_dir)
@@ -744,7 +1505,7 @@ def board_drc_evidence(project_dir: str | Path, *, board_content: str | None = N
     findings = [{"kind": "violation", **item} for item in payload.get("violations", [])] + [
         {"kind": "unconnected", **item} for item in payload.get("unconnected_items", [])
     ]
-    keys = sorted(json.dumps(item, sort_keys=True, separators=(",", ":")) for item in findings)
+    keys = sorted(_drc_finding_key(item) for item in findings)
     return {
         "status": "fail" if findings else "pass",
         "summary": {
@@ -1305,6 +2066,7 @@ def placement_plan(
     anchors: Iterable[JsonRecord] = (),
     cluster_regions: Iterable[JsonRecord] = (),
     keepout_regions: Iterable[list[float]] = (),
+    proximity_pairs: Iterable[JsonRecord] = (),
     margin_mm: float = 3.0,
     iterations: int = 300,
     grid_mm: float = 0.5,
@@ -1347,10 +2109,30 @@ def placement_plan(
     def rotated_geometry(
         item: JsonRecord, rotation_deg: float
     ) -> tuple[float, float, float, float]:
-        min_x = float(item.get("bbox_min_x_mm", -float(item["width_mm"]) / 2.0))
-        min_y = float(item.get("bbox_min_y_mm", -float(item["height_mm"]) / 2.0))
-        max_x = float(item.get("bbox_max_x_mm", float(item["width_mm"]) / 2.0))
-        max_y = float(item.get("bbox_max_y_mm", float(item["height_mm"]) / 2.0))
+        min_x = float(
+            item.get(
+                "body_bbox_min_x_mm",
+                item.get("bbox_min_x_mm", -float(item["width_mm"]) / 2.0),
+            )
+        )
+        min_y = float(
+            item.get(
+                "body_bbox_min_y_mm",
+                item.get("bbox_min_y_mm", -float(item["height_mm"]) / 2.0),
+            )
+        )
+        max_x = float(
+            item.get(
+                "body_bbox_max_x_mm",
+                item.get("bbox_max_x_mm", float(item["width_mm"]) / 2.0),
+            )
+        )
+        max_y = float(
+            item.get(
+                "body_bbox_max_y_mm",
+                item.get("bbox_max_y_mm", float(item["height_mm"]) / 2.0),
+            )
+        )
         angle = math.radians(rotation_deg)
         cosine = math.cos(angle)
         sine = math.sin(angle)
@@ -1533,6 +2315,33 @@ def placement_plan(
         if any(pattern.search(str(net["name"])) for pattern in CRITICAL_NET_PATTERNS):
             weight *= 0.35
         nets.append(PlacementNet(name=str(net["name"]), refs=refs, weight=weight))
+    resolved_proximity_pairs: list[JsonRecord] = []
+    for pair in proximity_pairs:
+        host_ref = str(pair.get("ic_ref", ""))
+        max_distance_mm = float(pair.get("max_distance_mm", 3.0))
+        for cap_ref_value in pair.get("cap_refs", []):
+            cap_ref = str(cap_ref_value)
+            if host_ref not in known_refs or cap_ref not in known_refs:
+                continue
+            # A dedicated two-node spring prevents a global rail such as GND,
+            # +3V3, or LTE_3V8 from pulling a decoupler toward the rail centroid.
+            # Repulsion and the legalizer still enforce physical separation.
+            weight = max(12.0, min(40.0, 72.0 / max(max_distance_mm, 1.0)))
+            nets.append(
+                PlacementNet(
+                    name=f"@proximity:{host_ref}:{cap_ref}",
+                    refs=[host_ref, cap_ref],
+                    weight=weight,
+                )
+            )
+            resolved_proximity_pairs.append(
+                {
+                    "host_reference": host_ref,
+                    "member_reference": cap_ref,
+                    "max_distance_mm": max_distance_mm,
+                    "spring_weight": round(weight, 4),
+                }
+            )
     local_keepouts = [
         (
             float(region[0]) - left,
@@ -1639,6 +2448,7 @@ def placement_plan(
         "iterations_run": stats.get("iterations_run"),
         "converged": stats.get("converged"),
         "nets_considered": len(nets),
+        "proximity_pairs": resolved_proximity_pairs,
         "legalized_moved": stats.get("legalized_moved"),
         "legalized_unresolved": unresolved,
         "anchors": resolved_anchors,

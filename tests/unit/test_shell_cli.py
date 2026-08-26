@@ -13,15 +13,19 @@ from mcp import types as mcp_types
 
 from kicad_mcp.compact_server import server as compact_server
 from kicad_mcp.deep_inspection import (
+    _drc_finding_key,
+    _polygons_overlap,
     _source_integrity_evidence,
     ascii_map,
     connectivity_proof,
     filter_snapshot,
     placement_plan,
+    power_loop_report,
     route_plan,
 )
 from kicad_mcp.shell_cli import (
     _apply_footprint_batch_to_board_content,
+    _drc_regression_details,
     _emit_records,
     _erc_finding_keys,
     _native_move_footprints_batch,
@@ -36,6 +40,77 @@ from kicad_mcp.shell_cli import (
     result_envelope,
     run_native_board_transaction,
 )
+from kicad_mcp.tools.board_file import _courtyard_polygons_from_block
+
+
+def test_concave_courtyard_is_preserved_as_one_polygon() -> None:
+    block = """(footprint "RF_Module"
+      (fp_line (start -24 -27.75) (end -24 -6.75) (layer "F.CrtYd"))
+      (fp_line (start -24 -6.75) (end -9.75 -6.75) (layer "F.CrtYd"))
+      (fp_line (start -9.75 13.45) (end -9.75 -6.75) (layer "F.CrtYd"))
+      (fp_line (start -9.75 13.45) (end 9.75 13.45) (layer "F.CrtYd"))
+      (fp_line (start 9.75 -6.75) (end 9.75 13.45) (layer "F.CrtYd"))
+      (fp_line (start 9.75 -6.75) (end 24 -6.75) (layer "F.CrtYd"))
+      (fp_line (start 24 -27.75) (end -24 -27.75) (layer "F.CrtYd"))
+      (fp_line (start 24 -6.75) (end 24 -27.75) (layer "F.CrtYd")))"""
+
+    polygons = _courtyard_polygons_from_block(block)
+
+    assert len(polygons) == 1
+    assert len(polygons[0]) == 8
+    assert [-24.0, -27.75] in polygons[0]
+    assert [-9.75, 13.45] in polygons[0]
+
+
+def test_concave_polygon_collision_does_not_use_one_full_bounding_box() -> None:
+    tee = [
+        (-24.0, -27.75),
+        (-24.0, -6.75),
+        (-9.75, -6.75),
+        (-9.75, 13.45),
+        (9.75, 13.45),
+        (9.75, -6.75),
+        (24.0, -6.75),
+        (24.0, -27.75),
+    ]
+    open_side = [(-11.5, -5.5), (-10.0, -5.5), (-10.0, -3.0), (-11.5, -3.0)]
+    body_overlap = [(-10.0, -5.5), (-8.0, -5.5), (-8.0, -3.0), (-10.0, -3.0)]
+
+    assert _polygons_overlap(tee, open_side) is False
+    assert _polygons_overlap(tee, body_overlap) is True
+
+
+def test_drc_regression_ignores_item_order_and_unconnected_pair_churn() -> None:
+    physical = {
+        "kind": "violation",
+        "type": "clearance",
+        "items": [{"uuid": "b"}, {"uuid": "a"}],
+    }
+    reordered = {**physical, "items": list(reversed(physical["items"]))}
+    old_unconnected = {
+        "kind": "unconnected",
+        "type": "unconnected_items",
+        "items": [{"uuid": "old-a"}, {"uuid": "old-b"}],
+    }
+    new_unconnected = {
+        "kind": "unconnected",
+        "type": "unconnected_items",
+        "items": [{"uuid": "new-a"}, {"uuid": "new-b"}],
+    }
+    before = {
+        "finding_keys": [_drc_finding_key(physical), _drc_finding_key(old_unconnected)],
+        "summary": {"violations": 1, "unconnected_items": 1},
+    }
+    staged = {
+        "finding_keys": [_drc_finding_key(reordered), _drc_finding_key(new_unconnected)],
+        "summary": {"violations": 1, "unconnected_items": 1},
+    }
+
+    details = _drc_regression_details(before, staged)
+
+    assert details["new_physical_findings"] == []
+    assert details["unconnected_increase"] == 0
+    assert details["regressed"] is False
 
 
 def test_native_move_footprints_batch_updates_once_and_preserves_rotation() -> None:
@@ -403,7 +478,7 @@ async def test_native_board_transaction_drops_commit_on_new_drc_finding(
     assert effects == ["begin", "drop"]
 
 
-async def test_native_placement_transaction_accepts_strict_drc_improvement(
+async def test_native_placement_transaction_rejects_new_findings_despite_lower_total(
     tmp_path: Path, monkeypatch
 ) -> None:
     import kicad_mcp.shell_cli as shell_cli
@@ -490,11 +565,10 @@ async def test_native_placement_transaction_accepts_strict_drc_improvement(
         label="placement",
     )
 
-    assert report["status"] == "pass"
-    assert report["accepted_placement_improvement"] is True
-    assert report["before_physical_violations"] == 2
-    assert report["staged_physical_violations"] == 1
-    assert effects == ["begin", "push", "save"]
+    assert report["status"] == "rejected"
+    assert report["regressions"]["regressed"] is True
+    assert report["regressions"]["unconnected_increase"] == 1
+    assert effects == ["begin", "drop"]
 
 
 def test_result_envelope_preserves_structured_and_text_content() -> None:
@@ -826,3 +900,84 @@ def test_shell_source_does_not_use_shell_execution() -> None:
     source = Path(__file__).parents[2] / "src" / "kicad_mcp" / "deep_inspection.py"
     text = source.read_text()
     assert "shell=True" not in text
+
+
+def test_power_loop_report_uses_same_net_pad_geometry_and_ground_return() -> None:
+    snapshot = {
+        "board": {
+            "footprints": [
+                {
+                    "reference": "U1",
+                    "value": "MCU",
+                    "x_mm": 10.0,
+                    "y_mm": 10.0,
+                    "pads": [
+                        {"number": "2", "net": "+3V3", "at": [9.0, 10.0]},
+                        {"number": "1", "net": "GND", "at": [9.0, 11.0]},
+                    ],
+                },
+                {
+                    "reference": "C1",
+                    "value": "100nF",
+                    "x_mm": 7.0,
+                    "y_mm": 10.0,
+                    "pads": [
+                        {"number": "1", "net": "+3V3", "at": [8.0, 10.0]},
+                        {"number": "2", "net": "GND", "at": [8.0, 11.0]},
+                    ],
+                },
+            ]
+        }
+    }
+
+    report = power_loop_report(
+        snapshot,
+        [{"ic_ref": "U1", "cap_refs": ["C1"], "max_distance_mm": 1.1}],
+    )
+
+    member = report["groups"][0]["members"][0]
+    assert report["status"] == "pass"
+    assert member["forward"]["net"] == "+3V3"
+    assert member["forward"]["distance_mm"] == pytest.approx(1.0)
+    assert member["return"]["distance_mm"] == pytest.approx(1.0)
+    assert member["loop_proxy_mm"] == pytest.approx(2.0)
+    assert member["origin_distance_mm"] == pytest.approx(3.0)
+
+
+def test_power_loop_report_rejects_declared_cap_without_shared_rail() -> None:
+    snapshot = {
+        "board": {
+            "footprints": [
+                {
+                    "reference": "U1",
+                    "value": "MCU",
+                    "x_mm": 0.0,
+                    "y_mm": 0.0,
+                    "pads": [
+                        {"number": "1", "net": "+3V3", "at": [0.0, 0.0]},
+                        {"number": "2", "net": "GND", "at": [0.0, 1.0]},
+                    ],
+                },
+                {
+                    "reference": "C1",
+                    "value": "100nF",
+                    "x_mm": 1.0,
+                    "y_mm": 0.0,
+                    "pads": [
+                        {"number": "1", "net": "+5V", "at": [1.0, 0.0]},
+                        {"number": "2", "net": "GND", "at": [1.0, 1.0]},
+                    ],
+                },
+            ]
+        }
+    }
+
+    report = power_loop_report(
+        snapshot,
+        [{"ic_ref": "U1", "cap_refs": ["C1"], "max_distance_mm": 2.0}],
+    )
+
+    member = report["groups"][0]["members"][0]
+    assert report["status"] == "fail"
+    assert member["forward"] is None
+    assert member["reason"] == "no shared non-ground pad net"

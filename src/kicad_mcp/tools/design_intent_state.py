@@ -31,6 +31,11 @@ class RFKeepoutIntent(BaseModel):
     """Intent describing an RF-sensitive keepout area."""
 
     name: str = Field(default="RF Keepout", min_length=1, max_length=100)
+    owner_ref: str = Field(
+        default="",
+        max_length=50,
+        description="Footprint that owns the keepout and is exempt from its overlap check.",
+    )
     x_mm: float
     y_mm: float
     w_mm: float = Field(gt=0.0, le=5000.0)

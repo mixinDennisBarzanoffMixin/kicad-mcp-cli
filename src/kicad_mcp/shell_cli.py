@@ -40,7 +40,10 @@ from .deep_inspection import (
     board_drc_evidence,
     connectivity_proof,
     filter_snapshot,
+    format_power_loop_report,
     placement_plan,
+    power_loop_placement_plan,
+    power_loop_report,
     project_snapshot,
     route_plan,
     verification_report,
@@ -723,6 +726,97 @@ async def run_native_board_transaction(
         return await _run_native_board_transaction(args, operations, label=label)
 
 
+def _drc_regression_details(
+    before_drc: dict[str, Any],
+    staged_drc: dict[str, Any],
+) -> dict[str, Any]:
+    """Compare stable physical findings and unrouted counts separately.
+
+    KiCad chooses representative pairs for an unrouted net. Moving a footprint
+    can therefore replace many ``unconnected_items`` keys even when the number
+    of unrouted items is unchanged. Treating those pair identities as new DRC
+    failures makes safe placement candidates impossible to verify.
+    """
+    new_keys = sorted(set(staged_drc["finding_keys"]) - set(before_drc["finding_keys"]))
+    new_findings = [json.loads(item) for item in new_keys]
+    new_physical = [
+        finding
+        for finding in new_findings
+        if finding.get("type") != "unconnected_items" and finding.get("kind") != "unconnected"
+    ]
+    before_summary = cast(dict[str, int], before_drc["summary"])
+    staged_summary = cast(dict[str, int], staged_drc["summary"])
+    before_unconnected = before_summary.get("unconnected_items", 0)
+    staged_unconnected = staged_summary.get("unconnected_items", 0)
+    return {
+        "new_findings": new_findings,
+        "new_physical_findings": new_physical,
+        "before_unconnected_items": before_unconnected,
+        "staged_unconnected_items": staged_unconnected,
+        "unconnected_increase": max(0, staged_unconnected - before_unconnected),
+        "regressed": bool(new_physical or staged_unconnected > before_unconnected),
+    }
+
+
+def _run_offline_placement_candidate(
+    *,
+    root: Path,
+    before_content: str,
+    operations: list[tuple[str, dict[str, Any]]],
+    artifacts: Path,
+    authority: dict[str, Any],
+) -> dict[str, Any]:
+    """Build and DRC a placement candidate when live KiCad cannot authorize commit."""
+    staged_content = before_content
+    for _tool_name, arguments in operations:
+        staged_content = _apply_footprint_batch_to_board_content(staged_content, arguments)
+        _verify_staged_footprint_batch(staged_content, arguments)
+        _verify_rigid_footprint_children(before_content, staged_content, arguments)
+    artifacts.mkdir(parents=True, exist_ok=True)
+    (artifacts / "before.kicad_pcb").write_text(before_content, encoding="utf-8")
+    (artifacts / "staged.kicad_pcb").write_text(staged_content, encoding="utf-8")
+    diff_text = "".join(
+        difflib.unified_diff(
+            before_content.splitlines(keepends=True),
+            staged_content.splitlines(keepends=True),
+            fromfile="before.kicad_pcb",
+            tofile="staged.kicad_pcb",
+        )
+    )
+    (artifacts / "edit.diff").write_text(diff_text, encoding="utf-8")
+    before_drc = board_drc_evidence(root, board_content=before_content)
+    staged_drc = board_drc_evidence(root, board_content=staged_content)
+    regressions = _drc_regression_details(before_drc, staged_drc)
+    if regressions["regressed"]:
+        return {
+            "schema_version": "1.0",
+            "status": "rejected",
+            "committed": False,
+            "candidate_verified": False,
+            "reason": "offline staged board introduces new DRC findings",
+            "before_drc": before_drc,
+            "staged_drc": staged_drc,
+            "regressions": regressions,
+            "authority": authority,
+            "artifacts": str(artifacts),
+            "diff": str(artifacts / "edit.diff"),
+        }
+    return {
+        "schema_version": "1.0",
+        "status": "blocked",
+        "committed": False,
+        "candidate_verified": True,
+        "reason": "offline candidate passes DRC regression gate; native authority is unavailable",
+        "before_drc": before_drc,
+        "staged_drc": staged_drc,
+        "regressions": regressions,
+        "authority": authority,
+        "artifacts": str(artifacts),
+        "diff": str(artifacts / "edit.diff"),
+        "diff_lines": len(diff_text.splitlines()),
+    }
+
+
 async def _run_native_board_transaction(
     args: argparse.Namespace,
     operations: list[tuple[str, dict[str, Any]]],
@@ -733,6 +827,19 @@ async def _run_native_board_transaction(
     root = Path(args.project_dir or ".").expanduser().resolve()
     authority = authority_report(root)
     if not authority["policy"]["board_mutation_allowed"]:
+        placement_only = bool(operations) and all(
+            name == "_native_move_footprints_batch" for name, _arguments in operations
+        )
+        if placement_only:
+            artifacts = _transaction_artifacts(root, args.artifacts, label)
+            _project, _schematic, board_path = _project_files(root)
+            return _run_offline_placement_candidate(
+                root=root,
+                before_content=board_path.read_text(encoding="utf-8"),
+                operations=operations,
+                artifacts=artifacts,
+                authority=authority,
+            )
         return {
             "schema_version": "1.0",
             "status": "blocked",
@@ -822,7 +929,7 @@ async def _run_native_board_transaction(
         )
         (artifacts / "edit.diff").write_text(diff_text, encoding="utf-8")
         staged_drc = board_drc_evidence(root, board_content=staged_content)
-        new_findings = sorted(set(staged_drc["finding_keys"]) - set(before_drc["finding_keys"]))
+        regressions = _drc_regression_details(before_drc, staged_drc)
         before_summary = cast(dict[str, int], before_drc["summary"])
         staged_summary = cast(dict[str, int], staged_drc["summary"])
         # KiCad reports physical DRC violations and unrouted items in separate
@@ -837,7 +944,7 @@ async def _run_native_board_transaction(
         placement_improved = (
             transform_only_placement and staged_physical_violations < before_physical_violations
         )
-        if new_findings and not placement_improved:
+        if regressions["regressed"]:
             drop_commit()
             commit_active = False
             return {
@@ -845,7 +952,8 @@ async def _run_native_board_transaction(
                 "status": "rejected",
                 "committed": False,
                 "reason": "staged board introduces new DRC findings",
-                "new_drc_findings": [json.loads(item) for item in new_findings],
+                "new_drc_findings": regressions["new_findings"],
+                "regressions": regressions,
                 "before_drc": before_drc,
                 "staged_drc": staged_drc,
                 "operations": results,
@@ -890,9 +998,8 @@ async def _run_native_board_transaction(
             "before_physical_violations": before_physical_violations,
             "staged_physical_violations": staged_physical_violations,
             "accepted_placement_improvement": placement_improved,
-            "new_drc_findings_after_improvement": (
-                [json.loads(item) for item in new_findings] if placement_improved else []
-            ),
+            "new_drc_findings_after_improvement": [],
+            "regressions": regressions,
             "authority": final_authority,
             "artifacts": str(artifacts),
             "diff": str(artifacts / "edit.diff"),
@@ -980,7 +1087,7 @@ def _placement_batch_requires_guarded_file(
     board_content: str,
     operations: list[tuple[str, dict[str, Any]]],
 ) -> bool:
-    """Use rigid file transforms when a moved footprint owns embedded zones."""
+    """Use rigid file transforms for rotations or footprints owning embedded zones."""
     if not operations or any(name != "_native_move_footprints_batch" for name, _ in operations):
         return False
     footprints = _parse_board_footprint_blocks(board_content)
@@ -992,7 +1099,12 @@ def _placement_batch_requires_guarded_file(
             if not isinstance(raw, dict):
                 continue
             footprint = footprints.get(str(raw.get("reference", "")))
-            if footprint is not None and "(zone" in str(footprint["block"]):
+            if footprint is None:
+                continue
+            requested_rotation = float(raw.get("rotation_deg", footprint["rotation"]) or 0.0)
+            current_rotation = float(footprint.get("rotation", 0.0) or 0.0)
+            rotation_delta = (requested_rotation - current_rotation + 180.0) % 360.0 - 180.0
+            if abs(rotation_delta) > 1e-3 or "(zone" in str(footprint["block"]):
                 return True
     return False
 
@@ -1029,19 +1141,20 @@ def _run_guarded_file_placement_transaction(
     )
     (artifacts / "edit.diff").write_text(diff_text, encoding="utf-8")
     staged_drc = board_drc_evidence(root, board_content=staged_content)
-    new_findings = sorted(set(staged_drc["finding_keys"]) - set(before_drc["finding_keys"]))
+    regressions = _drc_regression_details(before_drc, staged_drc)
     before_summary = cast(dict[str, int], before_drc["summary"])
     staged_summary = cast(dict[str, int], staged_drc["summary"])
     before_physical = before_summary.get("violations", 0)
     staged_physical = staged_summary.get("violations", 0)
     placement_improved = staged_physical < before_physical
-    if new_findings and not placement_improved:
+    if regressions["regressed"]:
         return {
             "schema_version": "1.0",
             "status": "rejected",
             "committed": False,
             "reason": "staged board introduces new DRC findings",
-            "new_drc_findings": [json.loads(item) for item in new_findings],
+            "new_drc_findings": regressions["new_findings"],
+            "regressions": regressions,
             "before_drc": before_drc,
             "staged_drc": staged_drc,
             "artifacts": str(artifacts),
@@ -1082,9 +1195,8 @@ def _run_guarded_file_placement_transaction(
         "before_physical_violations": before_physical,
         "staged_physical_violations": staged_physical,
         "accepted_placement_improvement": placement_improved,
-        "new_drc_findings_after_improvement": (
-            [json.loads(item) for item in new_findings] if placement_improved else []
-        ),
+        "new_drc_findings_after_improvement": [],
+        "regressions": regressions,
         "authority": final_authority,
         "artifacts": str(artifacts),
         "diff": str(artifacts / "edit.diff"),
@@ -1605,10 +1717,46 @@ def build_parser() -> argparse.ArgumentParser:
     place.add_argument("--iterations", type=int, default=300)
     place.add_argument("--grid", type=float, default=0.5, dest="grid_mm")
     place.add_argument("--seed", type=int, default=42)
+    place.add_argument(
+        "--spec",
+        default=".kicad-mcp/project_spec.json",
+        help="optional project-relative intent JSON supplying decoupling proximity pairs",
+    )
     place.add_argument("--apply", action="store_true")
     place.add_argument("--yes", action="store_true", help="confirm placement mutation")
     place.add_argument("--artifacts", default="", metavar="DIR")
     place.add_argument("--format", choices=("json", "jsonl"), default="json")
+
+    power_loops = subcommands.add_parser(
+        "power-loops",
+        help="inspect declared decouplers using actual rail-pad and ground-pad geometry",
+    )
+    power_loops.add_argument(
+        "--spec",
+        default=".kicad-mcp/project_spec.json",
+        help="project-relative design-intent JSON containing decoupling_pairs",
+    )
+    power_loops.add_argument("--ref", dest="reference", default="", help="one host IC ref")
+    power_loops.add_argument("--format", choices=("json", "jsonl", "text"), default="text")
+
+    place_power_loops = subcommands.add_parser(
+        "place-power-loops",
+        help="plan or apply pad-aware capacitor placement around declared host rails",
+    )
+    place_power_loops.add_argument(
+        "--spec",
+        default=".kicad-mcp/project_spec.json",
+        help="project-relative design-intent JSON containing decoupling_pairs",
+    )
+    place_power_loops.add_argument("--ref", dest="reference", default="", help="one host IC ref")
+    place_power_loops.add_argument("--grid", type=float, default=0.25, dest="grid_mm")
+    place_power_loops.add_argument(
+        "--margin", type=float, default=0.0, dest="courtyard_margin_mm"
+    )
+    place_power_loops.add_argument("--apply", action="store_true")
+    place_power_loops.add_argument("--yes", action="store_true")
+    place_power_loops.add_argument("--artifacts", default="", metavar="DIR")
+    place_power_loops.add_argument("--format", choices=("json", "jsonl"), default="json")
     return parser
 
 
@@ -1883,6 +2031,102 @@ def main(argv: Sequence[str] | None = None) -> None:
             else:
                 print(format_circuit_spec_arrangement(result))
             return
+        if args.command == "power-loops":
+            project_root = Path(args.project_dir or ".").expanduser().resolve()
+            spec_path = Path(args.spec).expanduser()
+            if not spec_path.is_absolute():
+                spec_path = project_root / spec_path
+            spec = _parse_json_object(spec_path.read_text(encoding="utf-8"), source=str(spec_path))
+            raw_pairs = spec.get("decoupling_pairs", [])
+            if not isinstance(raw_pairs, list):
+                raise ValueError(f"{spec_path}: decoupling_pairs must be a JSON array")
+            report = power_loop_report(
+                project_snapshot(project_root),
+                [cast(dict[str, Any], pair) for pair in raw_pairs if isinstance(pair, dict)],
+                reference=args.reference,
+            )
+            if args.format == "json":
+                print(json.dumps(report, indent=2, sort_keys=True))
+            elif args.format == "jsonl":
+                print(
+                    json.dumps(
+                        {"section": "summary", "status": report["status"], **report["summary"]},
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                )
+                for group in report["groups"]:
+                    print(
+                        json.dumps(
+                            {"section": "group", **group},
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        )
+                    )
+            else:
+                print(format_power_loop_report(report))
+            if report["status"] == "fail":
+                raise SystemExit(3)
+            return
+        if args.command == "place-power-loops":
+            project_root = Path(args.project_dir or ".").expanduser().resolve()
+            spec_path = Path(args.spec).expanduser()
+            if not spec_path.is_absolute():
+                spec_path = project_root / spec_path
+            spec = _parse_json_object(spec_path.read_text(encoding="utf-8"), source=str(spec_path))
+            raw_pairs = spec.get("decoupling_pairs", [])
+            if not isinstance(raw_pairs, list):
+                raise ValueError(f"{spec_path}: decoupling_pairs must be a JSON array")
+            plan = power_loop_placement_plan(
+                project_snapshot(project_root),
+                [cast(dict[str, Any], pair) for pair in raw_pairs if isinstance(pair, dict)],
+                reference=args.reference,
+                grid_mm=args.grid_mm,
+                courtyard_margin_mm=args.courtyard_margin_mm,
+            )
+            if args.apply:
+                if args.mode not in {"write", "experimental"}:
+                    raise ValueError("--apply requires --mode write or --mode experimental")
+                if not args.yes:
+                    raise ValueError("--apply requires --yes after reviewing the placement plan")
+                if plan["status"] != "planned":
+                    raise ValueError(f"power-loop placement cannot be applied: {plan['reason']}")
+                native_placements = [
+                    {
+                        "reference": placement["reference"],
+                        "x_mm": placement["to"][0],
+                        "y_mm": placement["to"][1],
+                        "rotation_deg": placement["rotation"],
+                    }
+                    for placement in plan["placements"]
+                ]
+                transaction = asyncio.run(
+                    run_native_board_transaction(
+                        args,
+                        [("_native_move_footprints_batch", {"placements": native_placements})],
+                        label="placement",
+                    )
+                )
+                plan["transaction"] = transaction
+                if transaction["status"] in {"rejected", "blocked"}:
+                    plan["status"] = transaction["status"]
+                    plan["reason"] = transaction["reason"]
+                else:
+                    plan["status"] = "applied"
+            indent = 2 if args.format == "json" else None
+            print(
+                json.dumps(
+                    plan,
+                    indent=indent,
+                    separators=None if indent else (",", ":"),
+                    sort_keys=True,
+                )
+            )
+            if plan["status"] == "blocked":
+                raise SystemExit(4)
+            if plan["status"] == "rejected":
+                raise SystemExit(3)
+            return
         if args.command == "route":
             plan = route_plan(
                 project_snapshot(args.project_dir or "."),
@@ -1973,12 +2217,28 @@ def main(argv: Sequence[str] | None = None) -> None:
                 if len(values) == 4:
                     anchor["rotation"] = float(values[3])
                 anchors.append(anchor)
+            project_root = Path(args.project_dir or ".").expanduser().resolve()
+            proximity_pairs: list[dict[str, Any]] = []
+            spec_path = Path(args.spec).expanduser()
+            if not spec_path.is_absolute():
+                spec_path = project_root / spec_path
+            if spec_path.is_file():
+                spec = _parse_json_object(
+                    spec_path.read_text(encoding="utf-8"), source=str(spec_path)
+                )
+                raw_pairs = spec.get("decoupling_pairs", [])
+                if not isinstance(raw_pairs, list):
+                    raise ValueError(f"{spec_path}: decoupling_pairs must be a JSON array")
+                proximity_pairs = [
+                    cast(dict[str, Any], pair) for pair in raw_pairs if isinstance(pair, dict)
+                ]
             plan = placement_plan(
-                project_snapshot(args.project_dir or "."),
+                project_snapshot(project_root),
                 fixed_references=args.fixed_references,
                 anchors=anchors,
                 cluster_regions=clusters,
                 keepout_regions=keepouts,
+                proximity_pairs=proximity_pairs,
                 margin_mm=args.margin_mm,
                 iterations=args.iterations,
                 grid_mm=args.grid_mm,

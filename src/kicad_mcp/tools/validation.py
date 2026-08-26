@@ -1571,10 +1571,39 @@ def _entry_bounds(
     origin_y = float(cast(float, entry["y_mm"]))
     width_mm = float(cast(float, entry["width_mm"]))
     height_mm = float(cast(float, entry["height_mm"]))
-    local_min_x = float(entry.get("bbox_min_x_mm", -width_mm / 2.0))
-    local_min_y = float(entry.get("bbox_min_y_mm", -height_mm / 2.0))
-    local_max_x = float(entry.get("bbox_max_x_mm", width_mm / 2.0))
-    local_max_y = float(entry.get("bbox_max_y_mm", height_mm / 2.0))
+    body_width_mm = float(cast(float, entry.get("body_width_mm", width_mm) or width_mm))
+    body_height_mm = float(cast(float, entry.get("body_height_mm", height_mm) or height_mm))
+    owns_extended_keepout = (
+        width_mm > body_width_mm * 1.5 or height_mm > body_height_mm * 1.5
+    )
+    min_x_key = "body_bbox_min_x_mm" if owns_extended_keepout else "bbox_min_x_mm"
+    min_y_key = "body_bbox_min_y_mm" if owns_extended_keepout else "bbox_min_y_mm"
+    max_x_key = "body_bbox_max_x_mm" if owns_extended_keepout else "bbox_max_x_mm"
+    max_y_key = "body_bbox_max_y_mm" if owns_extended_keepout else "bbox_max_y_mm"
+    local_min_x = float(
+        cast(
+            float,
+            entry.get(min_x_key, entry.get("bbox_min_x_mm", -width_mm / 2.0)),
+        )
+    )
+    local_min_y = float(
+        cast(
+            float,
+            entry.get(min_y_key, entry.get("bbox_min_y_mm", -height_mm / 2.0)),
+        )
+    )
+    local_max_x = float(
+        cast(
+            float,
+            entry.get(max_x_key, entry.get("bbox_max_x_mm", width_mm / 2.0)),
+        )
+    )
+    local_max_y = float(
+        cast(
+            float,
+            entry.get(max_y_key, entry.get("bbox_max_y_mm", height_mm / 2.0)),
+        )
+    )
     angle = math.radians(float(cast(float, entry.get("rotation", 0) or 0)))
     cosine = math.cos(angle)
     sine = math.sin(angle)
@@ -1780,51 +1809,59 @@ def _placement_analysis() -> tuple[PlacementAnalysis | None, GateOutcome | None]
                 f"Connector '{reference}' is {distance:.2f} mm from the nearest edge."
             )
 
-    checked_decoupling_pairs = 0
-    for pair in intent.decoupling_pairs:
-        ic_entry = footprints.get(pair.ic_ref)
-        if ic_entry is None:
-            decoupling_distance_violations.append(
-                f"Decoupling IC ref '{pair.ic_ref}' is missing on the board."
-            )
-            continue
-        if ic_entry["x_mm"] is None or ic_entry["y_mm"] is None:
-            decoupling_distance_violations.append(
-                f"Decoupling IC ref '{pair.ic_ref}' has no resolved placement."
-            )
-            continue
-        checked_decoupling_pairs += 1
-        cap_distances: list[float] = []
-        missing_caps: list[str] = []
-        for cap_ref in pair.cap_refs:
-            cap_entry = footprints.get(cap_ref)
-            if cap_entry is None:
-                missing_caps.append(cap_ref)
+    # Decoupling quality is a pad/net relationship, not a footprint-origin
+    # relationship. Check every declared capacitor against its actual host rail
+    # pad, and separately expose the ground-return proxy.
+    from ..deep_inspection import _pad_positions, power_loop_report
+
+    placement_snapshot = {
+        "board": {
+            "footprints": [
+                {
+                    **{
+                        key: value
+                        for key, value in entry.items()
+                        if key not in {"block", "start", "end", "pad_nets"}
+                    },
+                    "reference": reference,
+                    "pads": _pad_positions(entry),
+                }
+                for reference, entry in footprints.items()
+            ]
+        }
+    }
+    power_loops = power_loop_report(
+        placement_snapshot,
+        [pair.model_dump(mode="json") for pair in intent.decoupling_pairs],
+    )
+    checked_decoupling_pairs = int(power_loops["summary"]["groups"])
+    for group in power_loops["groups"]:
+        host_ref = str(group["host_reference"])
+        for member in group["members"]:
+            if member["status"] == "pass":
+                if member.get("return") is None:
+                    warnings.append(
+                        f"{host_ref}/{member['reference']}: no shared ground-return pad was found."
+                    )
                 continue
-            if cap_entry["x_mm"] is None or cap_entry["y_mm"] is None:
-                missing_caps.append(cap_ref)
-                continue
-            cap_distances.append(
-                math.hypot(
-                    float(ic_entry["x_mm"]) - float(cap_entry["x_mm"]),
-                    float(ic_entry["y_mm"]) - float(cap_entry["y_mm"]),
+            forward = member.get("forward")
+            if forward is None:
+                decoupling_distance_violations.append(
+                    f"{host_ref}/{member['reference']}: {member['reason']}."
                 )
-            )
-        if missing_caps:
+                continue
             decoupling_distance_violations.append(
-                f"{pair.ic_ref}: missing or unresolved decoupling caps -> "
-                + ", ".join(missing_caps[:12])
-            )
-        if cap_distances and min(cap_distances) > pair.max_distance_mm:
-            decoupling_distance_violations.append(
-                f"{pair.ic_ref}: nearest decoupling cap is {min(cap_distances):.2f} mm away "
-                f"(limit {pair.max_distance_mm:.2f} mm)."
+                f"{host_ref}/{member['reference']}: power-pad distance is "
+                f"{float(forward['distance_mm']):.2f} mm on {forward['net']} "
+                f"(limit {float(group['max_power_pad_distance_mm']):.2f} mm)."
             )
 
     checked_keepouts = 0
     for region in intent.rf_keepout_regions:
         checked_keepouts += 1
         for reference, entry in footprints.items():
+            if reference == region.owner_ref:
+                continue
             if entry["x_mm"] is None or entry["y_mm"] is None:
                 continue
             if _placement_boxes_overlap(

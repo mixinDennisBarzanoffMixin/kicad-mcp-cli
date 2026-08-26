@@ -174,7 +174,44 @@ kicadq -C ./board --mode write place --fix J1 --apply --yes
 Applied placement moves use the same native commit/DRC/drop transaction. Evidence
 includes the before/staged board sources, a unified diff, and before/staged DRC
 JSON summaries under `build/kicadq-transactions/` unless `--artifacts` overrides
-the destination.
+the destination. The DRC gate rejects every new physical finding and any increase
+in the unrouted-item count; a lower total violation count cannot hide a newly
+introduced problem.
+
+## Pad-aware power-loop inspection and placement
+
+`power-loops` checks declared IC/capacitor groups using the actual power-pad and
+ground-pad coordinates. It reports the forward rail distance, ground return
+distance, loop estimate, and the limiting pad pair instead of using footprint
+centres as an electrical proxy.
+
+```bash
+kicadq -C ./board power-loops --ref U1 --format json |
+  jq '.groups[] | {ic_ref,status,members}'
+kicadq -C ./board power-loops --format jsonl |
+  jq -c 'select(.section == "member" and .status != "pass")'
+```
+
+`place-power-loops` searches grid-aligned capacitor root transforms around each
+host. It rotates pad geometry rigidly, preserves concave KiCad courtyard loops,
+checks keepouts and other component courtyards, and scores both the supply path
+and ground return. Existing capacitor orientation is preferred unless rotation
+materially improves the electrical result.
+
+```bash
+kicadq -C ./board place-power-loops --ref U1 | jq '.placements,.after.groups'
+kicadq -C ./board --mode write place-power-loops --ref U1 \
+  --apply --yes --artifacts output/u1-placement | jq '.transaction'
+```
+
+An apply request never writes optimistically. It first constructs an offline
+candidate from the saved board, verifies every requested root transform and all
+rigid footprint children, and runs exact `kicad-cli` DRC. With synchronized native
+KiCad authority, the same transforms are held in an unpushed IPC commit, compared
+with the verified candidate, pushed, read back, verified again, and only then
+saved. A mismatch is reverted. If native IPC is unavailable, the verified
+candidate and diff are retained as evidence with `candidate_verified: true`, but
+the live/saved board is not modified and the command exits blocked (`4`).
 
 Both planners are proposals, not substitutes for KiCad DRC or electrical,
 thermal, RF, and mechanical review.

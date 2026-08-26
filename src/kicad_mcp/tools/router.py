@@ -570,6 +570,7 @@ TOOL_CATEGORIES: dict[str, ToolCategory] = {
         ),
         "tools": [
             "check_power_integrity",
+            "pcb_get_power_loop_report",
             "pdn_calculate_voltage_drop",
             "pdn_recommend_decoupling_caps",
             "pdn_check_copper_weight",
