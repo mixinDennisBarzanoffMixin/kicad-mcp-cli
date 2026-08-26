@@ -944,7 +944,31 @@ def _ascii_board(snapshot: JsonRecord, *, width: int) -> str:
     bounds = board["bounds_mm"]
     if not bounds:
         return f"{snapshot['project']['name']}  PCB MAP\n(no Edge.Cuts outline)"
-    x1, y1, x2, y2 = map(float, bounds)
+    board_x1, board_y1, board_x2, board_y2 = map(float, bounds)
+    x1, y1, x2, y2 = board_x1, board_y1, board_x2, board_y2
+    footprints = list(board["footprints"])
+    total_footprints = int(board.get("counts", {}).get("footprints", len(footprints)))
+    focused = bool(footprints) and len(footprints) < total_footprints
+    if focused:
+        footprint_xs = [float(item["x_mm"]) for item in footprints if item.get("x_mm") is not None]
+        footprint_ys = [float(item["y_mm"]) for item in footprints if item.get("y_mm") is not None]
+        if footprint_xs and footprint_ys:
+            center_x = sum(footprint_xs) / len(footprint_xs)
+            center_y = sum(footprint_ys) / len(footprint_ys)
+            span_x = max(
+                30.0,
+                max(float(item.get("width_mm", 2.0)) for item in footprints) + 10.0,
+                max(footprint_xs) - min(footprint_xs) + 16.0,
+            )
+            span_y = max(
+                24.0,
+                max(float(item.get("height_mm", 2.0)) for item in footprints) + 10.0,
+                max(footprint_ys) - min(footprint_ys) + 16.0,
+            )
+            x1 = max(board_x1, center_x - span_x / 2.0)
+            x2 = min(board_x2, center_x + span_x / 2.0)
+            y1 = max(board_y1, center_y - span_y / 2.0)
+            y2 = min(board_y2, center_y + span_y / 2.0)
     columns = max(30, min(width, 160))
     rows = max(12, min(48, round(columns * (y2 - y1) / max(x2 - x1, 1.0) * 0.45)))
     grid = [[" " for _ in range(columns)] for _ in range(rows)]
@@ -970,7 +994,7 @@ def _ascii_board(snapshot: JsonRecord, *, width: int) -> str:
             row = round(start_row + (end_row - start_row) * index / steps)
             if 0 < column < columns - 1 and 0 < row < rows - 1:
                 grid[row][column] = "·"
-    for footprint in board["footprints"]:
+    for footprint in footprints:
         column, row = cell([footprint["x_mm"], footprint["y_mm"]])
         label = str(footprint["reference"])
         for offset, character in enumerate(label):
@@ -981,8 +1005,11 @@ def _ascii_board(snapshot: JsonRecord, *, width: int) -> str:
     header = (
         f"{snapshot['project']['name']}  PCB MAP  "
         f"{x2 - x1:.1f}×{y2 - y1:.1f} mm  "
-        f"FP={len(board['footprints'])} TRACK={len(board['tracks'])} VIA={len(board['vias'])}"
+        f"FP={len(footprints)}/{total_footprints} "
+        f"TRACK={len(board['tracks'])} VIA={len(board['vias'])}"
     )
+    if focused:
+        header += f"  view=({x1:.1f},{y1:.1f})-({x2:.1f},{y2:.1f})"
     return header + "\n" + "\n".join("".join(row) for row in grid)
 
 

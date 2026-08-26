@@ -540,6 +540,7 @@ def _snapshot() -> dict[str, object]:
         },
         "board": {
             "bounds_mm": [0, 0, 20, 10],
+            "counts": {"footprints": 2, "tracks": 0, "vias": 0},
             "footprints": [
                 {
                     "reference": "U1",
@@ -572,6 +573,9 @@ def test_deep_filter_and_ascii_zoom() -> None:
     assert "COMPONENT MAP" in ascii_map(snapshot, zoom=1)
     assert "GPIO" in ascii_map(snapshot, zoom=2)
     assert "PCB MAP" in ascii_map(snapshot, zoom=3)
+    focused_board = ascii_map(filtered, zoom=3)
+    assert "FP=1/2" in focused_board
+    assert "view=" in focused_board
 
 
 def test_pad_rotation_uses_kicad_board_coordinate_direction() -> None:

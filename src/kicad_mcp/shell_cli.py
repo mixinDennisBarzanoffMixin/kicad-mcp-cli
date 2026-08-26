@@ -1758,11 +1758,12 @@ def main(argv: Sequence[str] | None = None) -> None:
                 print(json.dumps(report, indent=2, sort_keys=True))
             return
         if args.command == "map":
+            map_reference = args.reference or (args.center_ref if args.zoom == 3 else "")
             snapshot = filter_snapshot(
                 project_snapshot(args.project_dir or "."),
                 sheet=args.sheet,
                 net=args.net,
-                reference=args.reference,
+                reference=map_reference,
             )
             if args.view == "spatial":
                 print(
