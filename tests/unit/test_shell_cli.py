@@ -1045,6 +1045,50 @@ def test_route_plan_ignores_existing_tracks_on_another_copper_layer() -> None:
     assert plan["routing_methods"] == ["direct-manhattan"]
 
 
+def test_route_plan_selects_exact_endpoints_on_a_multi_pad_net() -> None:
+    snapshot = copy.deepcopy(_snapshot())
+    snapshot["board"]["footprints"][0]["pads"].append(
+        {"number": "2", "at": [5.0, 6.0], "net": "GPIO"}
+    )
+
+    plan = route_plan(
+        snapshot,
+        "GPIO",
+        from_endpoint="U1:1",
+        to_endpoint="R1:1",
+        clearance_mm=0.1,
+    )
+
+    assert plan["status"] == "planned"
+    assert [(item["reference"], item["pad"]) for item in plan["requested_endpoints"]] == [
+        ("U1", "1"),
+        ("R1", "1"),
+    ]
+    assert len(plan["routing_methods"]) == 1
+
+
+def test_route_plan_blocks_ambiguous_reference_only_endpoint() -> None:
+    snapshot = copy.deepcopy(_snapshot())
+    snapshot["board"]["footprints"][0]["pads"].append(
+        {"number": "2", "at": [5.0, 6.0], "net": "GPIO"}
+    )
+
+    plan = route_plan(
+        snapshot,
+        "GPIO",
+        from_endpoint="U1",
+        to_endpoint="R1",
+    )
+
+    assert plan["status"] == "blocked"
+    assert "use REF:PAD" in str(plan["reason"])
+
+
+def test_route_plan_requires_both_endpoint_selectors() -> None:
+    with pytest.raises(ValueError, match="supplied together"):
+        route_plan(_snapshot(), "GPIO", from_endpoint="U1:1")
+
+
 def test_critical_placement_report_measures_same_net_pad_distance() -> None:
     snapshot = _snapshot()
 

@@ -2051,6 +2051,8 @@ def route_plan(
     neck_length_mm: float = 0.0,
     clearance_mm: float = 0.5,
     allow_critical: bool = False,
+    from_endpoint: str = "",
+    to_endpoint: str = "",
 ) -> JsonRecord:
     """Plan simple Manhattan segments between PCB pads; never mutates a board."""
     if width_mm <= 0:
@@ -2061,6 +2063,8 @@ def route_plan(
         raise ValueError("route neck length cannot be negative")
     if body_width_mm is not None and neck_length_mm <= 0:
         raise ValueError("--body-width requires a positive --neck-length")
+    if bool(from_endpoint) != bool(to_endpoint):
+        raise ValueError("--from and --to must be supplied together")
     live = snapshot.get("board", {}).get("live_ipc", {})
     if live.get("status") == "connected" and live.get("semantic_match") is not True:
         return {
@@ -2097,8 +2101,44 @@ def route_plan(
             "segments": [],
         }
 
-    remaining = endpoints[1:]
-    connected = [endpoints[0]]
+    requested_endpoints: list[JsonRecord] = []
+    if from_endpoint and to_endpoint:
+        for selector in (from_endpoint, to_endpoint):
+            reference, separator, pad_number = selector.partition(":")
+            matches = [
+                endpoint
+                for endpoint in endpoints
+                if str(endpoint["reference"]) == reference
+                and (not separator or str(endpoint["pad"]) == pad_number)
+            ]
+            if len(matches) != 1:
+                return {
+                    "status": "blocked",
+                    "net": net_name,
+                    "critical": critical,
+                    "reason": (
+                        f"endpoint selector {selector!r} matched {len(matches)} pads on the net; "
+                        "use REF:PAD for an exact match"
+                    ),
+                    "endpoints": endpoints,
+                    "requested_endpoints": requested_endpoints,
+                    "segments": [],
+                }
+            requested_endpoints.append(matches[0])
+        if requested_endpoints[0] == requested_endpoints[1]:
+            return {
+                "status": "blocked",
+                "net": net_name,
+                "critical": critical,
+                "reason": "--from and --to resolve to the same pad",
+                "endpoints": endpoints,
+                "requested_endpoints": requested_endpoints,
+                "segments": [],
+            }
+
+    route_endpoints = requested_endpoints or endpoints
+    remaining = route_endpoints[1:]
+    connected = [route_endpoints[0]]
     edges: list[tuple[JsonRecord, JsonRecord]] = []
     while remaining:
         start, end = min(
@@ -2179,6 +2219,7 @@ def route_plan(
         "body_width_mm": body_width_mm,
         "clearance_mm": clearance_mm,
         "endpoints": endpoints,
+        "requested_endpoints": requested_endpoints,
         "segments": segments,
         "notes": [
             "Obstacle-aware orthogonal/MST proposal only; KiCad DRC remains authoritative.",

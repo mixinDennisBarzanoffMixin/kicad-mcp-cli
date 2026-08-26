@@ -2272,6 +2272,20 @@ def build_parser() -> argparse.ArgumentParser:
     route.add_argument("--clearance", type=float, default=0.5, dest="clearance_mm")
     route.add_argument("--allow-critical", action="store_true")
     route.add_argument(
+        "--from",
+        default="",
+        dest="from_endpoint",
+        metavar="REF[:PAD]",
+        help="route from one exact net endpoint instead of spanning every pad",
+    )
+    route.add_argument(
+        "--to",
+        default="",
+        dest="to_endpoint",
+        metavar="REF[:PAD]",
+        help="route to one exact net endpoint; requires --from",
+    )
+    route.add_argument(
         "--board-candidate",
         default="",
         metavar="FILE",
@@ -3218,6 +3232,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 neck_length_mm=args.neck_length_mm,
                 clearance_mm=args.clearance_mm,
                 allow_critical=args.allow_critical,
+                from_endpoint=args.from_endpoint,
+                to_endpoint=args.to_endpoint,
             )
             if args.apply:
                 if args.mode not in {"write", "experimental"}:

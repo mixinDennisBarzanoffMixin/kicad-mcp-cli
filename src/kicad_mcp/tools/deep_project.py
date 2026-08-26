@@ -89,8 +89,12 @@ def register(mcp: FastMCP) -> None:
         net_name: str,
         layer: str = "F.Cu",
         width_mm: float = 0.25,
+        body_width_mm: float | None = None,
+        neck_length_mm: float = 0.0,
         clearance_mm: float = 0.5,
         allow_critical: bool = False,
+        from_endpoint: str = "",
+        to_endpoint: str = "",
     ) -> str:
         """Dry-run a conservative Manhattan route between placed pads on one net.
 
@@ -103,8 +107,12 @@ def register(mcp: FastMCP) -> None:
             net_name,
             layer=layer,
             width_mm=width_mm,
+            body_width_mm=body_width_mm,
+            neck_length_mm=neck_length_mm,
             clearance_mm=clearance_mm,
             allow_critical=allow_critical,
+            from_endpoint=from_endpoint,
+            to_endpoint=to_endpoint,
         )
         return json.dumps(plan, indent=2, sort_keys=True)
 
