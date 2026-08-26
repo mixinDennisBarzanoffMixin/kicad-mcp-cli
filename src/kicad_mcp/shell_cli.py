@@ -40,6 +40,8 @@ from .deep_inspection import (
     authority_report,
     board_drc_evidence,
     connectivity_proof,
+    critical_placement_plan,
+    critical_placement_report,
     filter_snapshot,
     format_power_loop_report,
     placement_plan,
@@ -2087,6 +2089,36 @@ def build_parser() -> argparse.ArgumentParser:
     stackup.add_argument("--artifacts", default="", metavar="DIR")
     stackup.add_argument("--format", choices=("json",), default="json")
 
+    critical_placement = subcommands.add_parser(
+        "critical-placement",
+        help="measure named-net pad distances across declared power/RF placement pairs",
+    )
+    critical_placement.add_argument(
+        "--spec", default=".kicad-mcp/project_spec.json", metavar="JSON"
+    )
+    critical_placement.add_argument("--board-candidate", default="", metavar="FILE")
+    critical_placement.add_argument("--plan", action="store_true")
+    critical_placement.add_argument("--apply", action="store_true")
+    critical_placement.add_argument("--yes", action="store_true")
+    critical_placement.add_argument("--grid", type=float, default=0.25, dest="grid_mm")
+    critical_placement.add_argument(
+        "--margin", type=float, default=0.25, dest="courtyard_margin_mm"
+    )
+    critical_placement.add_argument(
+        "--yield-ref",
+        action="append",
+        default=[],
+        dest="yield_references",
+        help="diagnostically ignore one blocker while searching; repeatable",
+    )
+    critical_placement.add_argument("--artifacts", default="", metavar="DIR")
+    critical_placement.add_argument(
+        "--compose-intermediate",
+        action="store_true",
+        help="allow a DRC-failing yielded candidate solely as input to a later composite pass",
+    )
+    critical_placement.add_argument("--format", choices=("json", "jsonl"), default="json")
+
     place = subcommands.add_parser(
         "place", help="plan connectivity-aware PCB placement from existing footprints"
     )
@@ -2206,6 +2238,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         dest="yield_references",
         help="diagnostically let a lower-priority footprint yield its occupied space",
+    )
+    place_power_loops.add_argument(
+        "--repack",
+        action="store_true",
+        help="repack all declared capacitors for the selected host, even if they pass",
     )
     place_power_loops.add_argument("--apply", action="store_true")
     place_power_loops.add_argument("--yes", action="store_true")
@@ -2585,6 +2622,116 @@ def main(argv: Sequence[str] | None = None) -> None:
             if report["status"] == "rejected":
                 raise SystemExit(3)
             return
+        if args.command == "critical-placement":
+            project_root = Path(args.project_dir or ".").expanduser().resolve()
+            spec_path = Path(args.spec).expanduser()
+            if not spec_path.is_absolute():
+                spec_path = project_root / spec_path
+            if not spec_path.is_file():
+                raise ValueError(f"placement spec does not exist: {spec_path}")
+            spec = _parse_json_object(
+                spec_path.read_text(encoding="utf-8"), source=str(spec_path)
+            )
+            raw_constraints = spec.get("critical_placement_pairs", [])
+            if not isinstance(raw_constraints, list):
+                raise ValueError("critical_placement_pairs must be a JSON array")
+            candidate_path = (
+                Path(args.board_candidate).expanduser() if args.board_candidate else None
+            )
+            if candidate_path is not None and not candidate_path.is_absolute():
+                candidate_path = project_root / candidate_path
+            if candidate_path is not None and not candidate_path.is_file():
+                raise ValueError(f"board candidate does not exist: {candidate_path}")
+            snapshot = project_snapshot(
+                project_root,
+                board_content=(
+                    candidate_path.read_text(encoding="utf-8")
+                    if candidate_path is not None
+                    else None
+                ),
+                board_source=str(candidate_path) if candidate_path is not None else "",
+            )
+            constraints = [
+                cast(dict[str, Any], constraint)
+                for constraint in raw_constraints
+                if isinstance(constraint, dict)
+            ]
+            report = (
+                critical_placement_plan(
+                    snapshot,
+                    constraints,
+                    grid_mm=args.grid_mm,
+                    courtyard_margin_mm=args.courtyard_margin_mm,
+                    yield_references=args.yield_references,
+                )
+                if args.plan or args.apply
+                else critical_placement_report(snapshot, constraints)
+            )
+            if args.apply:
+                if args.yield_references and not args.compose_intermediate:
+                    raise ValueError(
+                        "--yield-ref is diagnostic only; relocate yielded footprints in a "
+                        "composite placement candidate or opt into --compose-intermediate"
+                    )
+                if candidate_path is None:
+                    raise ValueError("critical placement --apply requires --board-candidate")
+                if args.mode not in {"write", "experimental"}:
+                    raise ValueError("--apply requires --mode write or --mode experimental")
+                if not args.yes:
+                    raise ValueError("--apply requires --yes after reviewing the placement plan")
+                if report["status"] != "planned":
+                    raise ValueError(f"critical placement cannot be applied: {report['reason']}")
+                placements = [
+                    {
+                        "reference": placement["reference"],
+                        "x_mm": placement["to"][0],
+                        "y_mm": placement["to"][1],
+                        "rotation_deg": placement["rotation"],
+                    }
+                    for placement in report["placements"]
+                ]
+                artifacts = (
+                    Path(args.artifacts).expanduser().resolve()
+                    if args.artifacts
+                    else project_root
+                    / "build"
+                    / "kicadq-transactions"
+                    / "critical-placement"
+                )
+                transaction = _run_offline_candidate_refinement(
+                    root=project_root,
+                    before_content=candidate_path.read_text(encoding="utf-8"),
+                    operations=[("_native_move_footprints_batch", {"placements": placements})],
+                    artifacts=artifacts,
+                    source=str(candidate_path),
+                )
+                report["transaction"] = transaction
+                if transaction["status"] == "rejected":
+                    report["status"] = "rejected"
+                    report["reason"] = transaction["reason"]
+                else:
+                    report["status"] = "applied"
+            if args.format == "json":
+                print(json.dumps(report, indent=2, sort_keys=True))
+            else:
+                print(
+                    json.dumps(
+                        {"section": "summary", "status": report["status"], **report["summary"]},
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                )
+                for finding in report["findings"]:
+                    print(
+                        json.dumps(
+                            {"section": "finding", **finding},
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        )
+                    )
+            if report["status"] == "fail":
+                raise SystemExit(3)
+            return
         if args.command == "power-loops":
             project_root = Path(args.project_dir or ".").expanduser().resolve()
             spec_path = Path(args.spec).expanduser()
@@ -2666,6 +2813,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 grid_mm=args.grid_mm,
                 courtyard_margin_mm=args.courtyard_margin_mm,
                 yield_references=args.yield_references,
+                repack=args.repack,
             )
             if args.apply:
                 if args.yield_references:

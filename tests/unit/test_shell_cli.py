@@ -18,6 +18,8 @@ from kicad_mcp.deep_inspection import (
     _source_integrity_evidence,
     ascii_map,
     connectivity_proof,
+    critical_placement_plan,
+    critical_placement_report,
     filter_snapshot,
     placement_plan,
     power_loop_report,
@@ -845,6 +847,50 @@ def test_route_plan_keeps_adjacent_endpoint_pads_as_obstacles() -> None:
 
     assert narrow["collision_score"] == 0
     assert wide["collision_score"] > 0
+
+
+def test_critical_placement_report_measures_same_net_pad_distance() -> None:
+    snapshot = _snapshot()
+
+    report = critical_placement_report(
+        snapshot,
+        [
+            {
+                "reference_a": "U1",
+                "reference_b": "R1",
+                "nets": ["GPIO"],
+                "max_pad_distance_mm": 8.0,
+                "reason": "test loop",
+            }
+        ],
+    )
+
+    assert report["status"] == "fail"
+    assert report["findings"][0]["measurements"][0]["distance_mm"] == 10.0
+    assert report["findings"][0]["measurements"][0]["status"] == "fail"
+
+
+def test_critical_placement_plan_respects_allowed_rotations() -> None:
+    snapshot = _snapshot()
+
+    plan = critical_placement_plan(
+        snapshot,
+        [
+            {
+                "reference_a": "U1",
+                "reference_b": "R1",
+                "nets": ["GPIO"],
+                "max_pad_distance_mm": 4.0,
+                "allowed_rotations": [180.0],
+            }
+        ],
+        grid_mm=0.25,
+        courtyard_margin_mm=0.0,
+    )
+
+    assert plan["status"] == "planned"
+    assert plan["placements"][0]["rotation"] == 180.0
+    assert plan["after"]["status"] == "pass"
 
 
 def test_candidate_stackup_spec_and_named_net_track_rendering() -> None:

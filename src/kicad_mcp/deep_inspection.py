@@ -835,6 +835,7 @@ def power_loop_placement_plan(
     grid_mm: float = 0.25,
     courtyard_margin_mm: float = 0.0,
     yield_references: Iterable[str] = (),
+    repack: bool = False,
 ) -> JsonRecord:
     """Plan capacitor root transforms around matching host power pads.
 
@@ -868,10 +869,16 @@ def power_loop_placement_plan(
         for group in before["groups"]
         if group["status"] != "pass"
     }
+    selected_hosts = (
+        {reference}
+        if reference
+        else {str(group["host_reference"]) for group in before["groups"]}
+    )
+    active_hosts = selected_hosts if repack else failing_hosts
     movable_cap_refs = {
         str(member["reference"])
         for group in before["groups"]
-        if str(group["host_reference"]) in failing_hosts
+        if str(group["host_reference"]) in active_hosts
         for member in group["members"]
     }
     occupied: list[tuple[str, list[list[tuple[float, float]]]]] = []
@@ -915,7 +922,7 @@ def power_loop_placement_plan(
         if host is None or group is None:
             unresolved.append({"reference": host_ref, "reason": "host footprint is missing"})
             continue
-        if group["status"] == "pass":
+        if group["status"] == "pass" and not repack:
             continue
         member_by_ref = {str(member["reference"]): member for member in group["members"]}
         max_distance_mm = float(pair.get("max_distance_mm", 3.0))
@@ -1269,6 +1276,7 @@ def power_loop_placement_plan(
         "unresolved": unresolved,
         "search_diagnostics": search_diagnostics,
         "yielded_references": sorted(yielded_refs),
+        "repack": repack,
         "requires_relocation": sorted(yielded_refs),
         "before": before,
         "after": after,
@@ -2132,6 +2140,356 @@ def route_plan(
         ],
         "collision_score": collisions,
         "routing_methods": routing_methods,
+    }
+
+
+def critical_placement_report(
+    snapshot: JsonRecord,
+    constraints: Iterable[JsonRecord],
+) -> JsonRecord:
+    """Measure named-net pad distance across critical two-component placements."""
+    footprints = {
+        str(item.get("reference", "")): item
+        for item in snapshot.get("board", {}).get("footprints", [])
+    }
+    findings: list[JsonRecord] = []
+    for raw in constraints:
+        reference_a = str(raw.get("reference_a", raw.get("a", "")))
+        reference_b = str(raw.get("reference_b", raw.get("b", "")))
+        max_distance = float(raw.get("max_pad_distance_mm", 3.0))
+        nets = [str(net) for net in raw.get("nets", [])]
+        first = footprints.get(reference_a)
+        second = footprints.get(reference_b)
+        measurements: list[JsonRecord] = []
+        missing: list[str] = []
+        if first is None:
+            missing.append(reference_a)
+        if second is None:
+            missing.append(reference_b)
+        if first is not None and second is not None:
+            for net in nets:
+                first_pads = [pad for pad in first.get("pads", []) if pad.get("net") == net]
+                second_pads = [pad for pad in second.get("pads", []) if pad.get("net") == net]
+                if not first_pads or not second_pads:
+                    missing.append(f"{reference_a}<->{reference_b}:{net}")
+                    continue
+                first_pad, second_pad = min(
+                    ((a_pad, b_pad) for a_pad in first_pads for b_pad in second_pads),
+                    key=lambda pair: math.hypot(
+                        float(pair[0]["at"][0]) - float(pair[1]["at"][0]),
+                        float(pair[0]["at"][1]) - float(pair[1]["at"][1]),
+                    ),
+                )
+                dx = float(second_pad["at"][0]) - float(first_pad["at"][0])
+                dy = float(second_pad["at"][1]) - float(first_pad["at"][1])
+                distance = math.hypot(dx, dy)
+                measurements.append(
+                    {
+                        "net": net,
+                        "distance_mm": round(distance, 4),
+                        "max_distance_mm": max_distance,
+                        "status": "pass" if distance <= max_distance else "fail",
+                        "first": {
+                            "reference": reference_a,
+                            "pad": str(first_pad.get("number", "")),
+                            "at_mm": first_pad["at"],
+                        },
+                        "second": {
+                            "reference": reference_b,
+                            "pad": str(second_pad.get("number", "")),
+                            "at_mm": second_pad["at"],
+                        },
+                    }
+                )
+        failed = bool(missing) or not measurements or any(
+            measurement["status"] == "fail" for measurement in measurements
+        )
+        findings.append(
+            {
+                "name": str(raw.get("name", f"{reference_a}<->{reference_b}")),
+                "reference_a": reference_a,
+                "reference_b": reference_b,
+                "reason": str(raw.get("reason", "")),
+                "status": "fail" if failed else "pass",
+                "max_pad_distance_mm": max_distance,
+                "measurements": measurements,
+                "missing": missing,
+            }
+        )
+    failing = sum(finding["status"] == "fail" for finding in findings)
+    return {
+        "schema_version": "1.0",
+        "status": "fail" if failing else "pass",
+        "summary": {
+            "constraints": len(findings),
+            "passing": len(findings) - failing,
+            "failing": failing,
+        },
+        "findings": findings,
+    }
+
+
+def critical_placement_plan(
+    snapshot: JsonRecord,
+    constraints: Iterable[JsonRecord],
+    *,
+    grid_mm: float = 0.25,
+    courtyard_margin_mm: float = 0.25,
+    yield_references: Iterable[str] = (),
+) -> JsonRecord:
+    """Move declared member footprints near fixed hosts using named-net pad geometry."""
+    if grid_mm <= 0.0:
+        raise ValueError("grid_mm must be greater than zero")
+    constraint_list = [dict(item) for item in constraints]
+    before = critical_placement_report(snapshot, constraint_list)
+    footprints = {
+        str(item.get("reference", "")): item
+        for item in snapshot.get("board", {}).get("footprints", [])
+        if item.get("reference")
+    }
+    bounds_raw = snapshot.get("board", {}).get("bounds_mm")
+    if not isinstance(bounds_raw, list) or len(bounds_raw) != 4:
+        return {
+            "schema_version": "1.0",
+            "status": "blocked",
+            "reason": "board has no rectangular Edge.Cuts bounds",
+            "placements": [],
+            "before": before,
+        }
+    board_bounds = tuple(float(value) for value in bounds_raw)
+    movable_refs = {
+        str(item.get("reference_b", item.get("b", "")))
+        for item in constraint_list
+    }
+    yielded_refs = {str(reference) for reference in yield_references}
+    occupied: list[tuple[str, tuple[float, float, float, float]]] = []
+    for reference, footprint in footprints.items():
+        if reference in movable_refs or reference in yielded_refs:
+            continue
+        occupied.append(
+            (
+                reference,
+                _footprint_bounds_for_transform(
+                    footprint,
+                    float(footprint.get("x_mm") or 0.0),
+                    float(footprint.get("y_mm") or 0.0),
+                    float(footprint.get("rotation") or 0.0),
+                    margin_mm=courtyard_margin_mm,
+                ),
+            )
+        )
+
+    placements: list[JsonRecord] = []
+    unresolved: list[JsonRecord] = []
+    for constraint in constraint_list:
+        reference_a = str(constraint.get("reference_a", constraint.get("a", "")))
+        reference_b = str(constraint.get("reference_b", constraint.get("b", "")))
+        host = footprints.get(reference_a)
+        member = footprints.get(reference_b)
+        nets = [str(net) for net in constraint.get("nets", [])]
+        max_distance = float(constraint.get("max_pad_distance_mm", 3.0))
+        if host is None or member is None or not nets:
+            unresolved.append(
+                {
+                    "reference": reference_b,
+                    "host_reference": reference_a,
+                    "reason": "host/member footprint or named-net constraints are missing",
+                }
+            )
+            continue
+        net_pad_pairs: list[tuple[str, JsonRecord, JsonRecord]] = []
+        for net in nets:
+            host_pads = [pad for pad in host.get("pads", []) if pad.get("net") == net]
+            member_pads = [pad for pad in member.get("pads", []) if pad.get("net") == net]
+            if not host_pads or not member_pads:
+                continue
+            host_pad, member_pad = min(
+                ((a_pad, b_pad) for a_pad in host_pads for b_pad in member_pads),
+                key=lambda pair: math.hypot(
+                    float(pair[0]["at"][0]) - float(pair[1]["at"][0]),
+                    float(pair[0]["at"][1]) - float(pair[1]["at"][1]),
+                ),
+            )
+            net_pad_pairs.append((net, host_pad, member_pad))
+        if len(net_pad_pairs) != len(nets):
+            unresolved.append(
+                {
+                    "reference": reference_b,
+                    "host_reference": reference_a,
+                    "reason": "one or more declared nets lack pads on both footprints",
+                }
+            )
+            continue
+
+        candidates: list[tuple[tuple[float, float, float, float], JsonRecord]] = []
+        blocker_hits: Counter[str] = Counter()
+        search_radius = max(4.0, max_distance * 1.5)
+        steps = int(math.ceil(search_radius / grid_mm))
+        offsets = sorted(
+            (
+                (dx * grid_mm, dy * grid_mm)
+                for dx in range(-steps, steps + 1)
+                for dy in range(-steps, steps + 1)
+            ),
+            key=lambda offset: (
+                abs(offset[0]) + abs(offset[1]),
+                abs(offset[1]),
+                abs(offset[0]),
+                offset[1],
+                offset[0],
+            ),
+        )
+        allowed_rotations = tuple(
+            float(value)
+            for value in constraint.get("allowed_rotations", (0.0, 90.0, 180.0, 270.0))
+        )
+        for rotation in allowed_rotations:
+            ideal_roots: list[tuple[float, float]] = []
+            local_offsets: list[tuple[str, JsonRecord, float, float]] = []
+            for net, host_pad, member_pad in net_pad_pairs:
+                local_x, local_y = _pad_local_offset(member, member_pad)
+                offset_x, offset_y = _rotate_local_offset(local_x, local_y, rotation)
+                ideal_roots.append(
+                    (
+                        float(host_pad["at"][0]) - offset_x,
+                        float(host_pad["at"][1]) - offset_y,
+                    )
+                )
+                local_offsets.append((net, host_pad, offset_x, offset_y))
+            ideal_x = round(
+                (sum(root[0] for root in ideal_roots) / len(ideal_roots)) / grid_mm
+            ) * grid_mm
+            ideal_y = round(
+                (sum(root[1] for root in ideal_roots) / len(ideal_roots)) / grid_mm
+            ) * grid_mm
+            for offset_x, offset_y in offsets:
+                root_x = round(ideal_x + offset_x, 6)
+                root_y = round(ideal_y + offset_y, 6)
+                member_bounds = _footprint_bounds_for_transform(
+                    member,
+                    root_x,
+                    root_y,
+                    rotation,
+                    margin_mm=courtyard_margin_mm,
+                )
+                if (
+                    member_bounds[0] < board_bounds[0]
+                    or member_bounds[1] < board_bounds[1]
+                    or member_bounds[2] > board_bounds[2]
+                    or member_bounds[3] > board_bounds[3]
+                ):
+                    continue
+                blockers = [
+                    reference
+                    for reference, occupied_bounds in occupied
+                    if _rectangles_overlap(member_bounds, occupied_bounds)
+                ]
+                if blockers:
+                    blocker_hits.update(blockers)
+                    continue
+                measurements: list[JsonRecord] = []
+                distances: list[float] = []
+                for net, host_pad, pad_offset_x, pad_offset_y in local_offsets:
+                    member_at = [root_x + pad_offset_x, root_y + pad_offset_y]
+                    distance = math.hypot(
+                        member_at[0] - float(host_pad["at"][0]),
+                        member_at[1] - float(host_pad["at"][1]),
+                    )
+                    distances.append(distance)
+                    measurements.append(
+                        {
+                            "net": net,
+                            "distance_mm": round(distance, 4),
+                            "host_pad": str(host_pad.get("number", "")),
+                            "member_at_mm": [round(value, 4) for value in member_at],
+                        }
+                    )
+                if any(distance > max_distance + 1e-6 for distance in distances):
+                    continue
+                movement = math.hypot(
+                    root_x - float(member.get("x_mm") or 0.0),
+                    root_y - float(member.get("y_mm") or 0.0),
+                )
+                score = (max(distances), sum(distances), movement, rotation)
+                candidates.append(
+                    (
+                        score,
+                        {
+                            "reference": reference_b,
+                            "host_reference": reference_a,
+                            "from": [
+                                float(member.get("x_mm") or 0.0),
+                                float(member.get("y_mm") or 0.0),
+                            ],
+                            "to": [root_x, root_y],
+                            "from_rotation": float(member.get("rotation") or 0.0),
+                            "rotation": rotation,
+                            "max_pad_distance_mm": max_distance,
+                            "measurements": measurements,
+                        },
+                    )
+                )
+        if not candidates:
+            unresolved.append(
+                {
+                    "reference": reference_b,
+                    "host_reference": reference_a,
+                    "reason": "no collision-free transform satisfies every named-net distance",
+                    "blocking_footprints": [
+                        {"reference": reference, "hits": hits}
+                        for reference, hits in blocker_hits.most_common(12)
+                    ],
+                }
+            )
+            continue
+        _score, selected = min(candidates, key=lambda candidate: candidate[0])
+        placements.append(selected)
+        occupied.append(
+            (
+                reference_b,
+                _footprint_bounds_for_transform(
+                    member,
+                    float(selected["to"][0]),
+                    float(selected["to"][1]),
+                    float(selected["rotation"]),
+                    margin_mm=courtyard_margin_mm,
+                ),
+            )
+        )
+
+    proposed_snapshot = copy.deepcopy(snapshot)
+    proposed_by_ref = {
+        str(item.get("reference", "")): item
+        for item in proposed_snapshot.get("board", {}).get("footprints", [])
+    }
+    for placement in placements:
+        footprint = proposed_by_ref[str(placement["reference"])]
+        root_x, root_y = (float(value) for value in placement["to"])
+        rotation = float(placement["rotation"])
+        for pad in footprint.get("pads", []):
+            local_x, local_y = _pad_local_offset(footprint, pad)
+            pad_x, pad_y = _rotate_local_offset(local_x, local_y, rotation)
+            pad["at"] = [round(root_x + pad_x, 4), round(root_y + pad_y, 4)]
+        footprint["x_mm"] = root_x
+        footprint["y_mm"] = root_y
+        footprint["rotation"] = rotation
+    after = critical_placement_report(proposed_snapshot, constraint_list)
+    status = "planned" if not unresolved and after["status"] == "pass" else "blocked"
+    return {
+        "schema_version": "1.0",
+        "status": status,
+        "reason": (
+            "all critical member footprints have collision-free named-net transforms"
+            if status == "planned"
+            else "one or more critical placement constraints remain unresolved"
+        ),
+        "grid_mm": grid_mm,
+        "courtyard_margin_mm": courtyard_margin_mm,
+        "yielded_references": sorted(yielded_refs),
+        "placements": placements,
+        "unresolved": unresolved,
+        "before": before,
+        "after": after,
     }
 
 
