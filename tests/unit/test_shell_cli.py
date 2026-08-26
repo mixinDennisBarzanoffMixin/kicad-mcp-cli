@@ -982,6 +982,69 @@ def test_route_plan_rotates_anisotropic_endpoint_pad_obstacles() -> None:
     assert plan["collision_findings"] == []
 
 
+def test_route_plan_profiles_narrow_endpoint_necks_and_wide_body() -> None:
+    plan = route_plan(
+        _snapshot(),
+        "GPIO",
+        width_mm=0.2,
+        body_width_mm=0.8,
+        neck_length_mm=1.0,
+        clearance_mm=0.1,
+    )
+
+    assert plan["status"] == "planned"
+    assert [segment["profile_region"] for segment in plan["segments"]] == [
+        "neck",
+        "body",
+        "neck",
+    ]
+    assert [segment["width"] for segment in plan["segments"]] == [0.2, 0.8, 0.2]
+    assert plan["neck_length_mm"] == 1.0
+    assert plan["body_width_mm"] == 0.8
+
+
+def test_route_plan_requires_neck_length_for_body_width() -> None:
+    with pytest.raises(ValueError, match="body-width"):
+        route_plan(_snapshot(), "GPIO", body_width_mm=0.8)
+
+
+def test_route_plan_routes_around_existing_track_copper_width() -> None:
+    snapshot = copy.deepcopy(_snapshot())
+    snapshot["board"]["tracks"] = [
+        {
+            "start": [6.0, 5.5],
+            "end": [14.0, 5.5],
+            "width_mm": 0.4,
+            "layer": "F.Cu",
+            "net": "OTHER",
+        }
+    ]
+
+    plan = route_plan(snapshot, "GPIO", width_mm=0.4, clearance_mm=0.2)
+
+    assert plan["status"] == "planned"
+    assert plan["routing_methods"] == ["astar-grid"]
+    assert plan["collision_findings"] == []
+
+
+def test_route_plan_ignores_existing_tracks_on_another_copper_layer() -> None:
+    snapshot = copy.deepcopy(_snapshot())
+    snapshot["board"]["tracks"] = [
+        {
+            "start": [6.0, 5.0],
+            "end": [14.0, 5.0],
+            "width_mm": 1.0,
+            "layer": "B.Cu",
+            "net": "OTHER",
+        }
+    ]
+
+    plan = route_plan(snapshot, "GPIO", layer="F.Cu", width_mm=0.4, clearance_mm=0.2)
+
+    assert plan["status"] == "planned"
+    assert plan["routing_methods"] == ["direct-manhattan"]
+
+
 def test_critical_placement_report_measures_same_net_pad_distance() -> None:
     snapshot = _snapshot()
 

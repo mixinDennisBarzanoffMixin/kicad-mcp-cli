@@ -2047,10 +2047,20 @@ def route_plan(
     *,
     layer: str = "F.Cu",
     width_mm: float = 0.25,
+    body_width_mm: float | None = None,
+    neck_length_mm: float = 0.0,
     clearance_mm: float = 0.5,
     allow_critical: bool = False,
 ) -> JsonRecord:
     """Plan simple Manhattan segments between PCB pads; never mutates a board."""
+    if width_mm <= 0:
+        raise ValueError("route width must be positive")
+    if body_width_mm is not None and body_width_mm <= 0:
+        raise ValueError("route body width must be positive")
+    if neck_length_mm < 0:
+        raise ValueError("route neck length cannot be negative")
+    if body_width_mm is not None and neck_length_mm <= 0:
+        raise ValueError("--body-width requires a positive --neck-length")
     live = snapshot.get("board", {}).get("live_ipc", {})
     if live.get("status") == "connected" and live.get("semantic_match") is not True:
         return {
@@ -2113,31 +2123,44 @@ def route_plan(
             board,
             clearance=clearance_mm,
             width_mm=width_mm,
+            layer=layer,
             excluded_refs=excluded_refs,
             net_name=net_name,
         )
         routing_methods.append(method)
-        collisions += _route_collision_score(
+        profiled = _profile_route_segments(
             points,
-            board,
-            clearance_mm,
-            width_mm=width_mm,
-            excluded_refs=excluded_refs,
-            net_name=net_name,
-            findings=collision_findings,
+            neck_width_mm=width_mm,
+            body_width_mm=body_width_mm,
+            neck_length_mm=neck_length_mm,
         )
-        for first, second in zip(points, points[1:], strict=False):
-            if first == second:
-                continue
+        for first, second, segment_width, profile_region in profiled:
+            segment_findings: list[JsonRecord] = []
+            collisions += _route_collision_score(
+                [first, second],
+                board,
+                clearance_mm,
+                width_mm=segment_width,
+                layer=layer,
+                excluded_refs=excluded_refs,
+                net_name=net_name,
+                findings=segment_findings,
+            )
+            for finding in segment_findings:
+                finding["segment"] = len(segments) + 1
+                finding["profile_region"] = profile_region
+                finding["width_mm"] = segment_width
+            collision_findings.extend(segment_findings)
             segments.append(
                 {
                     "x1": first[0],
                     "y1": first[1],
                     "x2": second[0],
                     "y2": second[1],
-                    "width": width_mm,
+                    "width": segment_width,
                     "layer": layer,
                     "net": net_name,
+                    "profile_region": profile_region,
                 }
             )
     return {
@@ -2151,6 +2174,9 @@ def route_plan(
         ),
         "layer": layer,
         "width_mm": width_mm,
+        "neck_width_mm": width_mm,
+        "neck_length_mm": neck_length_mm,
+        "body_width_mm": body_width_mm,
         "clearance_mm": clearance_mm,
         "endpoints": endpoints,
         "segments": segments,
@@ -2162,6 +2188,75 @@ def route_plan(
         "collision_findings": collision_findings,
         "routing_methods": routing_methods,
     }
+
+
+def _profile_route_segments(
+    points: list[list[float]] | list[tuple[float, float]],
+    *,
+    neck_width_mm: float,
+    body_width_mm: float | None,
+    neck_length_mm: float,
+) -> list[tuple[list[float], list[float], float, str]]:
+    """Split a Manhattan polyline into narrow endpoint necks and a wider body."""
+    raw_segments: list[tuple[list[float], list[float], float, float]] = []
+    cursor = 0.0
+    for raw_first, raw_second in zip(points, points[1:], strict=False):
+        first = [float(raw_first[0]), float(raw_first[1])]
+        second = [float(raw_second[0]), float(raw_second[1])]
+        length = abs(second[0] - first[0]) + abs(second[1] - first[1])
+        if length <= 0:
+            continue
+        raw_segments.append((first, second, cursor, cursor + length))
+        cursor += length
+    if not raw_segments:
+        return []
+    if body_width_mm is None:
+        return [
+            (first, second, neck_width_mm, "uniform")
+            for first, second, _start, _end in raw_segments
+        ]
+
+    total_length = cursor
+    boundaries = sorted(
+        {
+            0.0,
+            min(neck_length_mm, total_length),
+            max(0.0, total_length - neck_length_mm),
+            total_length,
+        }
+    )
+    result: list[tuple[list[float], list[float], float, str]] = []
+    for first, second, start_distance, end_distance in raw_segments:
+        cuts = [start_distance]
+        cuts.extend(
+            boundary
+            for boundary in boundaries
+            if start_distance < boundary < end_distance
+        )
+        cuts.append(end_distance)
+        length = end_distance - start_distance
+        for piece_start, piece_end in zip(cuts, cuts[1:], strict=False):
+            start_ratio = (piece_start - start_distance) / length
+            end_ratio = (piece_end - start_distance) / length
+            start_point = [
+                first[0] + (second[0] - first[0]) * start_ratio,
+                first[1] + (second[1] - first[1]) * start_ratio,
+            ]
+            end_point = [
+                first[0] + (second[0] - first[0]) * end_ratio,
+                first[1] + (second[1] - first[1]) * end_ratio,
+            ]
+            midpoint = (piece_start + piece_end) / 2.0
+            in_neck = midpoint < neck_length_mm or midpoint > total_length - neck_length_mm
+            result.append(
+                (
+                    start_point,
+                    end_point,
+                    neck_width_mm if in_neck else body_width_mm,
+                    "neck" if in_neck else "body",
+                )
+            )
+    return result
 
 
 def critical_placement_report(
@@ -2520,6 +2615,7 @@ def _route_collision_score(
     clearance: float,
     *,
     width_mm: float = 0.0,
+    layer: str = "F.Cu",
     excluded_refs: set[str] | None = None,
     net_name: str = "",
     findings: list[JsonRecord] | None = None,
@@ -2608,9 +2704,18 @@ def _route_collision_score(
         for track in board.get("tracks", []):
             if track.get("net") == net_name:
                 continue
-            if track.get("layer") not in {None, "F.Cu", "B.Cu"}:
+            track_layer = str(track.get("layer", ""))
+            if track_layer and track_layer != layer:
                 continue
-            if _segments_intersect(first, second, track["start"], track["end"], clearance):
+            track_width_mm = float(track.get("width_mm", track.get("width", 0.0)) or 0.0)
+            copper_clearance = clearance + (width_mm + track_width_mm) / 2.0
+            if _segments_intersect(
+                first,
+                second,
+                track["start"],
+                track["end"],
+                copper_clearance,
+            ):
                 score += 1
                 if findings is not None:
                     findings.append(
@@ -2618,7 +2723,8 @@ def _route_collision_score(
                             "segment": segment_index,
                             "kind": "existing_track",
                             "net": str(track.get("net", "")),
-                            "layer": str(track.get("layer", "")),
+                            "layer": track_layer,
+                            "width_mm": track_width_mm,
                             "start": list(track["start"]),
                             "end": list(track["end"]),
                         }
@@ -2691,6 +2797,7 @@ def _orthogonal_route(
     *,
     clearance: float,
     width_mm: float = 0.0,
+    layer: str = "F.Cu",
     excluded_refs: set[str],
     net_name: str,
     grid_mm: float = 0.5,
@@ -2705,6 +2812,7 @@ def _orthogonal_route(
             board,
             clearance,
             width_mm=width_mm,
+            layer=layer,
             excluded_refs=excluded_refs,
             net_name=net_name,
         )
@@ -2749,6 +2857,7 @@ def _orthogonal_route(
                 board,
                 clearance,
                 width_mm=width_mm,
+                layer=layer,
                 excluded_refs=excluded_refs,
                 net_name=net_name,
             ):

@@ -2248,7 +2248,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     route.add_argument("net")
     route.add_argument("--layer", default="F.Cu")
-    route.add_argument("--width", type=float, default=0.25, dest="width_mm")
+    route.add_argument(
+        "--width",
+        type=float,
+        default=0.25,
+        dest="width_mm",
+        help="uniform width, or endpoint neck width when --body-width is used",
+    )
+    route.add_argument(
+        "--body-width",
+        type=float,
+        default=None,
+        dest="body_width_mm",
+        help="wider route-body width between two endpoint necks",
+    )
+    route.add_argument(
+        "--neck-length",
+        type=float,
+        default=0.0,
+        dest="neck_length_mm",
+        help="narrow length measured from each route endpoint",
+    )
     route.add_argument("--clearance", type=float, default=0.5, dest="clearance_mm")
     route.add_argument("--allow-critical", action="store_true")
     route.add_argument(
@@ -3194,6 +3214,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 args.net,
                 layer=args.layer,
                 width_mm=args.width_mm,
+                body_width_mm=args.body_width_mm,
+                neck_length_mm=args.neck_length_mm,
                 clearance_mm=args.clearance_mm,
                 allow_critical=args.allow_critical,
             )
