@@ -151,6 +151,20 @@ def test_legalize_placement_removes_overlaps_and_preserves_fixed_anchor() -> Non
             ) >= (component.h + other.h) / 2
 
 
+def test_legalize_placement_does_not_snap_fixed_anchor_to_grid() -> None:
+    anchor = PlacementComponent("J1", 7.23, 8.0, w=14.46, h=4.0, fixed=True)
+    stats: dict[str, object] = {}
+
+    placed = legalize_placement(
+        [anchor],
+        ForceDirectedConfig(board_w=40.0, board_h=20.0, grid_mm=0.5),
+        stats=stats,
+    )
+
+    assert (placed[0].x, placed[0].y) == (7.23, 8.0)
+    assert stats["legalized_unresolved"] == []
+
+
 def test_board_placement_net_weights_prioritize_power_and_differential_pairs() -> None:
     assert _placement_net_weight("GND") == 3.0
     assert _placement_net_weight("+3V3") == 3.0

@@ -1545,8 +1545,7 @@ def _nearest_edge_distance(
     min_x, min_y, max_x, max_y = frame
     x_mm = float(cast(float, entry["x_mm"]))
     y_mm = float(cast(float, entry["y_mm"]))
-    width_mm = float(cast(float, entry["width_mm"]))
-    height_mm = float(cast(float, entry["height_mm"]))
+    width_mm, height_mm = _rotated_entry_dimensions(entry)
     return min(
         x_mm - (width_mm / 2) - min_x,
         max_x - (x_mm + (width_mm / 2)),
@@ -1561,6 +1560,15 @@ def _entry_center(entry: dict[str, object]) -> tuple[float, float] | None:
     return float(cast(float, entry["x_mm"])), float(cast(float, entry["y_mm"]))
 
 
+def _rotated_entry_dimensions(entry: dict[str, object]) -> tuple[float, float]:
+    width_mm = float(cast(float, entry["width_mm"]))
+    height_mm = float(cast(float, entry["height_mm"]))
+    rotation = int(round(float(cast(float, entry.get("rotation", 0) or 0)))) % 180
+    if rotation == 90:
+        return height_mm, width_mm
+    return width_mm, height_mm
+
+
 def _bbox_gap_mm(left_entry: dict[str, object], right_entry: dict[str, object]) -> float | None:
     left_center = _entry_center(left_entry)
     right_center = _entry_center(right_entry)
@@ -1568,10 +1576,8 @@ def _bbox_gap_mm(left_entry: dict[str, object], right_entry: dict[str, object]) 
         return None
     left_x, left_y = left_center
     right_x, right_y = right_center
-    left_w = float(cast(float, left_entry["width_mm"]))
-    left_h = float(cast(float, left_entry["height_mm"]))
-    right_w = float(cast(float, right_entry["width_mm"]))
-    right_h = float(cast(float, right_entry["height_mm"]))
+    left_w, left_h = _rotated_entry_dimensions(left_entry)
+    right_w, right_h = _rotated_entry_dimensions(right_entry)
     gap_x = abs(left_x - right_x) - ((left_w + right_w) / 2.0)
     gap_y = abs(left_y - right_y) - ((left_h + right_h) / 2.0)
     return max(max(gap_x, 0.0), max(gap_y, 0.0))
@@ -1696,8 +1702,7 @@ def _placement_analysis() -> tuple[PlacementAnalysis | None, GateOutcome | None]
             continue
         left_x = float(left_entry["x_mm"])
         left_y = float(left_entry["y_mm"])
-        left_w = float(left_entry["width_mm"])
-        left_h = float(left_entry["height_mm"])
+        left_w, left_h = _rotated_entry_dimensions(left_entry)
         if (
             left_x - (left_w / 2) < min_x
             or left_x + (left_w / 2) > max_x
@@ -1715,8 +1720,7 @@ def _placement_analysis() -> tuple[PlacementAnalysis | None, GateOutcome | None]
                 left_h,
                 float(right_entry["x_mm"]),
                 float(right_entry["y_mm"]),
-                float(right_entry["width_mm"]),
-                float(right_entry["height_mm"]),
+                *_rotated_entry_dimensions(right_entry),
                 0.0,
             ):
                 overlaps.append(f"{left_ref}/{right_ref}")
@@ -1789,8 +1793,7 @@ def _placement_analysis() -> tuple[PlacementAnalysis | None, GateOutcome | None]
             if _placement_boxes_overlap(
                 float(entry["x_mm"]),
                 float(entry["y_mm"]),
-                float(entry["width_mm"]),
-                float(entry["height_mm"]),
+                *_rotated_entry_dimensions(entry),
                 region.x_mm,
                 region.y_mm,
                 region.w_mm,

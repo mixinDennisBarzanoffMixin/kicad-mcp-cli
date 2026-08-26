@@ -926,7 +926,11 @@ def _component_category(reference: str, entry: dict[str, Any]) -> str:
     upper_ref = reference.upper()
     upper_name = footprint_name.upper()
     upper_value = value_name.upper()
-    if upper_ref.startswith("J") or "CONNECTOR" in upper_name or "USB" in upper_name:
+    if (
+        re.fullmatch(r"J\d+", upper_ref)
+        or "CONNECTOR" in upper_name
+        or "USB" in upper_name
+    ):
         return "connector"
     if upper_ref.startswith("C") or "CAPACITOR" in upper_name:
         return "capacitor"

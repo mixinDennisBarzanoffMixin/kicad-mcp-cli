@@ -1272,6 +1272,7 @@ def placement_plan(
     snapshot: JsonRecord,
     *,
     fixed_references: Iterable[str] = (),
+    anchors: Iterable[JsonRecord] = (),
     keepout_regions: Iterable[list[float]] = (),
     margin_mm: float = 3.0,
     iterations: int = 300,
@@ -1296,19 +1297,110 @@ def placement_plan(
         return {"status": "blocked", "reason": "board has no footprints", "placements": []}
     left, top, right, bottom = map(float, bounds)
     width, height = right - left, bottom - top
-    fixed = set(fixed_references)
+    anchor_list = list(anchors)
+    anchor_by_ref = {str(anchor["reference"]): anchor for anchor in anchor_list}
+    fixed = set(fixed_references) | set(anchor_by_ref)
+    rotation_by_ref = {
+        str(item["reference"]): float(item.get("rotation", 0.0) or 0.0)
+        for item in footprints
+    }
+    for reference, anchor in anchor_by_ref.items():
+        if reference not in rotation_by_ref:
+            return {
+                "status": "blocked",
+                "reason": f"anchor reference '{reference}' is not present on the board",
+                "placements": [],
+            }
+        if anchor.get("rotation") is not None:
+            rotation_by_ref[reference] = float(anchor["rotation"])
     components = [
         PlacementComponent(
             ref=str(item["reference"]),
             x=float(item["x_mm"]) - left,
             y=float(item["y_mm"]) - top,
-            w=float(item["width_mm"]) + margin_mm,
-            h=float(item["height_mm"]) + margin_mm,
+            w=(
+                float(item["height_mm"])
+                if int(round(rotation_by_ref[str(item["reference"])])) % 180 == 90
+                else float(item["width_mm"])
+            )
+            + margin_mm,
+            h=(
+                float(item["width_mm"])
+                if int(round(rotation_by_ref[str(item["reference"])])) % 180 == 90
+                else float(item["height_mm"])
+            )
+            + margin_mm,
             fixed=str(item["reference"]) in fixed,
         )
         for item in footprints
         if item.get("x_mm") is not None and item.get("y_mm") is not None
     ]
+    saved_components = [PlacementComponent(**component.__dict__) for component in components]
+    components_by_ref = {component.ref: component for component in components}
+    resolved_anchors: list[JsonRecord] = []
+    for anchor in anchor_list:
+        reference = str(anchor["reference"])
+        component = components_by_ref.get(reference)
+        if component is None:
+            return {
+                "status": "blocked",
+                "reason": f"anchor reference '{reference}' has no resolved placement",
+                "placements": [],
+            }
+        if anchor.get("x_mm") is not None and anchor.get("y_mm") is not None:
+            edge = "absolute"
+            offset: float | None = None
+            component.x = float(anchor["x_mm"]) - left
+            component.y = float(anchor["y_mm"]) - top
+            if (
+                component.x - (component.w / 2.0) < 0.0
+                or component.x + (component.w / 2.0) > width
+                or component.y - (component.h / 2.0) < 0.0
+                or component.y + (component.h / 2.0) > height
+            ):
+                return {
+                    "status": "blocked",
+                    "reason": f"anchor '{reference}' absolute position is outside the board",
+                    "placements": [],
+                }
+        else:
+            edge = str(anchor.get("edge", "")).lower()
+            offset = float(anchor["offset_mm"])
+        if edge in {"top", "bottom"}:
+            edge_offset = 0.0 if offset is None else offset
+            if not 0.0 <= edge_offset <= width:
+                return {
+                    "status": "blocked",
+                    "reason": f"anchor '{reference}' offset is outside board width",
+                    "placements": [],
+                }
+            component.x = edge_offset
+            component.y = component.h / 2.0 if edge == "top" else height - component.h / 2.0
+        elif edge in {"left", "right"}:
+            edge_offset = 0.0 if offset is None else offset
+            if not 0.0 <= edge_offset <= height:
+                return {
+                    "status": "blocked",
+                    "reason": f"anchor '{reference}' offset is outside board height",
+                    "placements": [],
+                }
+            component.x = component.w / 2.0 if edge == "left" else width - component.w / 2.0
+            component.y = edge_offset
+        elif edge != "absolute":
+            return {
+                "status": "blocked",
+                "reason": f"anchor '{reference}' edge must be top, right, bottom, or left",
+                "placements": [],
+            }
+        resolved_anchors.append(
+            {
+                "reference": reference,
+                "edge": edge,
+                "offset_mm": offset,
+                "rotation": rotation_by_ref[reference],
+                "position_mm": [round(component.x + left, 4), round(component.y + top, 4)],
+            }
+        )
     known_refs = {component.ref for component in components}
     nets: list[PlacementNet] = []
     for net in snapshot["schematic"]["nets"]:
@@ -1353,11 +1445,7 @@ def placement_plan(
         ),
         stats=stats,
     )
-    original = {component.ref: component for component in components}
-    rotation_by_ref = {
-        str(item["reference"]): float(item.get("rotation", 0.0) or 0.0)
-        for item in footprints
-    }
+    original = {component.ref: component for component in saved_components}
     placements = [
         {
             "reference": component.ref,
@@ -1367,10 +1455,36 @@ def placement_plan(
             ],
             "to": [round(component.x + left, 4), round(component.y + top, 4)],
             "fixed": component.fixed,
+            "anchored": component.ref in anchor_by_ref,
+            "from_rotation": next(
+                float(item.get("rotation", 0.0) or 0.0)
+                for item in footprints
+                if str(item["reference"]) == component.ref
+            ),
             "rotation": rotation_by_ref.get(component.ref, 0.0),
         }
         for component in proposed
     ]
+
+    def weighted_hpwl(layout: Iterable[PlacementComponent]) -> float:
+        positions = {component.ref: (component.x, component.y) for component in layout}
+        total = 0.0
+        for net in nets:
+            points = [positions[reference] for reference in net.refs if reference in positions]
+            if len(points) < 2:
+                continue
+            xs = [point[0] for point in points]
+            ys = [point[1] for point in points]
+            total += net.weight * ((max(xs) - min(xs)) + (max(ys) - min(ys)))
+        return total
+
+    hpwl_before = weighted_hpwl(saved_components)
+    hpwl_after = weighted_hpwl(proposed)
+    hpwl_delta_pct = (
+        ((hpwl_after - hpwl_before) / hpwl_before) * 100.0 if hpwl_before > 0.0 else 0.0
+    )
+    unresolved = list(stats.get("legalized_unresolved", []))
+    quality_pass = hpwl_delta_pct <= 25.0 and not unresolved
     return {
         "status": "planned",
         "board_bounds_mm": list(bounds),
@@ -1382,7 +1496,25 @@ def placement_plan(
         "converged": stats.get("converged"),
         "nets_considered": len(nets),
         "legalized_moved": stats.get("legalized_moved"),
-        "legalized_unresolved": stats.get("legalized_unresolved"),
+        "legalized_unresolved": unresolved,
+        "anchors": resolved_anchors,
+        "weighted_hpwl_before_mm": round(hpwl_before, 3),
+        "weighted_hpwl_after_mm": round(hpwl_after, 3),
+        "wirelength_delta_pct": round(hpwl_delta_pct, 2),
+        "quality_gate": {
+            "status": "pass" if quality_pass else "fail",
+            "max_wirelength_increase_pct": 25.0,
+            "reason": (
+                "weighted HPWL is within the allowed regression threshold"
+                if quality_pass
+                else (
+                    "placement legalization left unresolved footprints: "
+                    + ", ".join(unresolved)
+                    if unresolved
+                    else "weighted HPWL would regress by more than 25%"
+                )
+            ),
+        },
         "placements": placements,
         "notes": [
             "Connectivity-aware proposal only; connector, RF, thermal, and mechanical "

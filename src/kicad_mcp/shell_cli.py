@@ -25,6 +25,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+from kipy.geometry import Vector2
 from mcp import types as mcp_types
 from pydantic import BaseModel
 
@@ -43,6 +44,8 @@ from .deep_inspection import (
     verification_report,
 )
 from .endpoint_net_equality import compare_compiled_endpoint_nets
+from .pcb.board_access import board_footprints
+from .pcb.footprint_transform import apply_footprint_rotation, verify_footprint_rotation
 from .schematic_graph_placement import (
     format_schematic_graph_placement,
     plan_schematic_graph_placement,
@@ -758,7 +761,10 @@ async def run_native_board_transaction(
         commit = board.begin_commit()
         commit_active = True
         for tool_name, arguments in operations:
-            result = await invoke_backend_tool(args, tool_name, arguments)
+            if tool_name == "_native_move_footprints_batch":
+                result = _native_move_footprints_batch(board, arguments)
+            else:
+                result = await invoke_backend_tool(args, tool_name, arguments)
             results.append(result)
             if not result["ok"]:
                 drop_commit()
@@ -838,6 +844,69 @@ async def run_native_board_transaction(
             with contextlib.suppress(Exception):
                 drop_commit()
         raise
+
+
+def _native_move_footprints_batch(
+    board: object,
+    arguments: dict[str, Any],
+) -> dict[str, JSONValue]:
+    """Apply one placement plan through a single native IPC update call."""
+    raw_placements = arguments.get("placements", [])
+    if not isinstance(raw_placements, list):
+        return {
+            "ok": False,
+            "tool": "_native_move_footprints_batch",
+            "error": "placements must be a list",
+        }
+    footprints = board_footprints(board)
+    by_reference = {
+        str(footprint.reference_field.text.value): footprint for footprint in footprints
+    }
+    missing: list[str] = []
+    changed: list[object] = []
+    rotation_attributes: dict[str, str] = {}
+    requested_rotations: dict[str, float] = {}
+    for raw in raw_placements:
+        if not isinstance(raw, dict):
+            return {
+                "ok": False,
+                "tool": "_native_move_footprints_batch",
+                "error": "every placement must be an object",
+            }
+        reference = str(raw.get("reference", ""))
+        footprint = by_reference.get(reference)
+        if footprint is None:
+            missing.append(reference)
+            continue
+        x_mm = float(raw["x_mm"])
+        y_mm = float(raw["y_mm"])
+        rotation_deg = float(raw.get("rotation_deg", 0.0))
+        footprint.position = Vector2.from_xy_mm(x_mm, y_mm)
+        rotation_attributes[reference] = apply_footprint_rotation(footprint, rotation_deg)
+        requested_rotations[reference] = rotation_deg
+        changed.append(footprint)
+    if missing:
+        return {
+            "ok": False,
+            "tool": "_native_move_footprints_batch",
+            "error": "missing footprint references: " + ", ".join(sorted(missing)),
+        }
+    board.update_items(changed)
+    refreshed = {
+        str(footprint.reference_field.text.value): footprint
+        for footprint in board_footprints(board)
+    }
+    for reference, attribute in rotation_attributes.items():
+        verify_footprint_rotation(
+            refreshed[reference],
+            attribute,  # type: ignore[arg-type]
+            requested_rotations[reference],
+        )
+    return {
+        "ok": True,
+        "tool": "_native_move_footprints_batch",
+        "result": {"moved": len(changed)},
+    }
 
 
 def _rg_binary() -> str:
@@ -1182,6 +1251,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="hold one mechanical anchor reference fixed; repeatable",
     )
     place.add_argument(
+        "--anchor",
+        dest="anchors",
+        action="append",
+        default=[],
+        metavar="REF,EDGE,OFFSET[,ROTATION]",
+        help=(
+            "anchor a footprint at top/right/bottom/left; offset is measured from "
+            "the board's left or top edge; repeatable"
+        ),
+    )
+    place.add_argument(
+        "--at",
+        dest="absolute_anchors",
+        action="append",
+        default=[],
+        metavar="REF,X,Y[,ROTATION]",
+        help="anchor a footprint at an absolute board coordinate; repeatable",
+    )
+    place.add_argument(
         "--keepout",
         dest="keepout_regions",
         action="append",
@@ -1521,9 +1609,35 @@ def main(argv: Sequence[str] | None = None) -> None:
                 if len(values) != 4:
                     raise ValueError("--keepout requires X1,Y1,X2,Y2")
                 keepouts.append(values)
+            anchors: list[dict[str, Any]] = []
+            for raw in args.anchors:
+                values = [value.strip() for value in raw.split(",")]
+                if len(values) not in {3, 4}:
+                    raise ValueError("--anchor requires REF,EDGE,OFFSET[,ROTATION]")
+                anchor: dict[str, Any] = {
+                    "reference": values[0],
+                    "edge": values[1],
+                    "offset_mm": float(values[2]),
+                }
+                if len(values) == 4:
+                    anchor["rotation"] = float(values[3])
+                anchors.append(anchor)
+            for raw in args.absolute_anchors:
+                values = [value.strip() for value in raw.split(",")]
+                if len(values) not in {3, 4}:
+                    raise ValueError("--at requires REF,X,Y[,ROTATION]")
+                anchor = {
+                    "reference": values[0],
+                    "x_mm": float(values[1]),
+                    "y_mm": float(values[2]),
+                }
+                if len(values) == 4:
+                    anchor["rotation"] = float(values[3])
+                anchors.append(anchor)
             plan = placement_plan(
                 project_snapshot(args.project_dir or "."),
                 fixed_references=args.fixed_references,
+                anchors=anchors,
                 keepout_regions=keepouts,
                 margin_mm=args.margin_mm,
                 iterations=args.iterations,
@@ -1538,22 +1652,50 @@ def main(argv: Sequence[str] | None = None) -> None:
                 if plan["status"] != "planned":
                     reason = plan.get("reason", plan["status"])
                     raise ValueError(f"placement cannot be applied: {reason}")
-                operations: list[tuple[str, dict[str, Any]]] = []
-                for placement in plan["placements"]:
-                    if placement["fixed"] or placement["from"] == placement["to"]:
-                        continue
-                    x_mm, y_mm = placement["to"]
-                    operations.append(
-                        (
-                            "pcb_move_footprint",
-                            {
-                                "reference": placement["reference"],
-                                "x_mm": x_mm,
-                                "y_mm": y_mm,
-                                "rotation_deg": placement["rotation"],
-                            },
+                quality_gate = plan.get("quality_gate", {})
+                if quality_gate.get("status") != "pass":
+                    plan["status"] = "rejected"
+                    plan["reason"] = str(
+                        quality_gate.get("reason", "placement quality gate failed")
+                    )
+                    indent = 2 if args.format == "json" else None
+                    print(
+                        json.dumps(
+                            plan,
+                            indent=indent,
+                            separators=None if indent else (",", ":"),
+                            sort_keys=True,
                         )
                     )
+                    raise SystemExit(3)
+                placements_to_apply: list[dict[str, Any]] = []
+                for placement in plan["placements"]:
+                    if placement["fixed"] and not placement.get("anchored"):
+                        continue
+                    if (
+                        placement["from"] == placement["to"]
+                        and placement.get("from_rotation") == placement["rotation"]
+                    ):
+                        continue
+                    x_mm, y_mm = placement["to"]
+                    placements_to_apply.append(
+                        {
+                            "reference": placement["reference"],
+                            "x_mm": x_mm,
+                            "y_mm": y_mm,
+                            "rotation_deg": placement["rotation"],
+                        }
+                    )
+                operations = (
+                    [
+                        (
+                            "_native_move_footprints_batch",
+                            {"placements": placements_to_apply},
+                        )
+                    ]
+                    if placements_to_apply
+                    else []
+                )
                 transaction = asyncio.run(
                     run_native_board_transaction(args, operations, label="placement")
                 )
@@ -1561,6 +1703,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 if transaction["status"] in {"rejected", "blocked"}:
                     plan["status"] = transaction["status"]
                     plan["reason"] = transaction["reason"]
+                else:
+                    plan["status"] = "applied"
             indent = 2 if args.format == "json" else None
             print(
                 json.dumps(

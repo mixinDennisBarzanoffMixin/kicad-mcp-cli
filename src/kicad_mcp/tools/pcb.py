@@ -1718,8 +1718,16 @@ def _auto_place_force_directed_board_file(
             ref=reference,
             x=float(entry["x_mm"]) - x_min,
             y=float(entry["y_mm"]) - y_min,
-            w=float(entry["width_mm"]),
-            h=float(entry["height_mm"]),
+            w=(
+                float(entry["height_mm"])
+                if int(entry["rotation"]) % 180 == 90
+                else float(entry["width_mm"])
+            ),
+            h=(
+                float(entry["width_mm"])
+                if int(entry["rotation"]) % 180 == 90
+                else float(entry["height_mm"])
+            ),
             fixed=False,
         )
         for reference, entry in movable

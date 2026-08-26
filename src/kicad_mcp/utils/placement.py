@@ -112,7 +112,13 @@ def _inside_board(
     cfg: ForceDirectedConfig,
 ) -> bool:
     left, top, right, bottom = _component_bounds(x, y, component)
-    return left >= 0.0 and top >= 0.0 and right <= cfg.board_w and bottom <= cfg.board_h
+    epsilon_mm = 1e-6
+    return (
+        left >= -epsilon_mm
+        and top >= -epsilon_mm
+        and right <= cfg.board_w + epsilon_mm
+        and bottom <= cfg.board_h + epsilon_mm
+    )
 
 
 def _hits_keepout(
@@ -411,14 +417,16 @@ def legalize_placement(
     max_rings = int(math.ceil(max(cfg.board_w, cfg.board_h) / step)) + 2
     for component in ordered:
         original = (component.x, component.y)
-        candidate_x = _snap(component.x, cfg.grid_mm)
-        candidate_y = _snap(component.y, cfg.grid_mm)
         if component.fixed:
+            candidate_x = component.x
+            candidate_y = component.y
             if not available(component, candidate_x, candidate_y):
                 unresolved.append(component.ref)
             component.x, component.y = candidate_x, candidate_y
             placed.append(component)
             continue
+        candidate_x = _snap(component.x, cfg.grid_mm)
+        candidate_y = _snap(component.y, cfg.grid_mm)
         if not available(component, candidate_x, candidate_y):
             found: tuple[float, float] | None = None
             for ring in range(1, max_rings + 1):

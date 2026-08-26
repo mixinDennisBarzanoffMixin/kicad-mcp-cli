@@ -7,6 +7,7 @@ import copy
 import json
 from pathlib import Path
 
+from kipy.geometry import Angle, Vector2
 from mcp import types as mcp_types
 
 from kicad_mcp.compact_server import server as compact_server
@@ -21,6 +22,7 @@ from kicad_mcp.deep_inspection import (
 from kicad_mcp.shell_cli import (
     _emit_records,
     _erc_finding_keys,
+    _native_move_footprints_batch,
     _resolve_edit_schematic,
     _rewire_tool_calls,
     _schematic_manifest,
@@ -29,6 +31,46 @@ from kicad_mcp.shell_cli import (
     result_envelope,
     run_native_board_transaction,
 )
+
+
+def test_native_move_footprints_batch_updates_once_and_preserves_rotation() -> None:
+    class Text:
+        value = "U1"
+
+    class Reference:
+        text = Text()
+
+    class Footprint:
+        reference_field = Reference()
+        position = Vector2.from_xy_mm(1.0, 2.0)
+        angle = Angle.from_degrees(90.0)
+
+    footprint = Footprint()
+
+    class Board:
+        updates = 0
+
+        def get_footprints(self) -> list[object]:
+            return [footprint]
+
+        def update_items(self, items: list[object]) -> None:
+            assert items == [footprint]
+            self.updates += 1
+
+    board = Board()
+    result = _native_move_footprints_batch(
+        board,
+        {
+            "placements": [
+                {"reference": "U1", "x_mm": 10.0, "y_mm": 12.0, "rotation_deg": 90.0}
+            ]
+        },
+    )
+
+    assert result["ok"] is True
+    assert result["result"] == {"moved": 1}
+    assert board.updates == 1
+    assert footprint.position == Vector2.from_xy_mm(10.0, 12.0)
 
 
 def test_names_output_uses_paths_for_file_manifest_records(capsys) -> None:
@@ -551,6 +593,44 @@ def test_placement_plan_is_deterministic_and_holds_fixed_references() -> None:
     assert u1["fixed"] is True
     assert u1["from"] == u1["to"]
     assert u1["rotation"] == 90.0
+    assert first["weighted_hpwl_before_mm"] >= 0.0
+    assert first["weighted_hpwl_after_mm"] >= 0.0
+    assert first["quality_gate"]["status"] in {"pass", "fail"}
+
+
+def test_placement_plan_resolves_edge_anchor_and_rotation() -> None:
+    snapshot = _snapshot()
+
+    plan = placement_plan(
+        snapshot,
+        anchors=[{"reference": "U1", "edge": "left", "offset_mm": 4, "rotation": 90}],
+        iterations=5,
+    )
+
+    anchor = plan["anchors"][0]
+    u1 = next(item for item in plan["placements"] if item["reference"] == "U1")
+    assert anchor["edge"] == "left"
+    assert anchor["rotation"] == 90.0
+    assert anchor["position_mm"][1] == 4.0
+    assert u1["fixed"] is True
+    assert u1["anchored"] is True
+    assert u1["to"] == anchor["position_mm"]
+    assert u1["rotation"] == 90.0
+
+
+def test_placement_plan_resolves_absolute_anchor() -> None:
+    plan = placement_plan(
+        _snapshot(),
+        anchors=[{"reference": "U1", "x_mm": 8, "y_mm": 4}],
+        iterations=5,
+        margin_mm=0,
+    )
+
+    anchor = plan["anchors"][0]
+    u1 = next(item for item in plan["placements"] if item["reference"] == "U1")
+    assert anchor["edge"] == "absolute"
+    assert anchor["position_mm"] == [8.0, 4.0]
+    assert u1["to"] == [8.0, 4.0]
 
 
 def test_shell_source_does_not_use_shell_execution() -> None:
