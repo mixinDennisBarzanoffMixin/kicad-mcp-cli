@@ -1649,14 +1649,17 @@ def _verify_rigid_footprint_children(
     observed_content: str,
     arguments: dict[str, Any],
 ) -> None:
-    """Reject IPC moves that mutate any footprint child geometry.
+    """Reject moves that mutate footprint children beyond a rigid rotation.
 
     KiCad 10 IPC currently translates some embedded footprint zones when only
-    the parent position is updated.  Position-only placement must be a rigid
-    transform: after normalizing the requested root ``(at ...)``, every child
-    token must remain byte-identical to the offline candidate.
+    the parent position is updated.  KiCad board files also store pad
+    orientations in board coordinates, so a true footprint rotation changes
+    each pad ``(at x y angle)`` by the same angular delta as the root.  Build
+    that exact expected transform first; after normalizing the root
+    ``(at ...)``, every other child token must remain byte-identical.
     """
-    expected = _parse_board_footprint_blocks(expected_content)
+    expected_candidate = _apply_footprint_batch_to_board_content(expected_content, arguments)
+    expected = _parse_board_footprint_blocks(expected_candidate)
     observed = _parse_board_footprint_blocks(observed_content)
     root_at_pattern = re.compile(
         rf"(?P<indent>^[ \t]*)\(at\s+{FLOAT_PATTERN}\s+{FLOAT_PATTERN}"
@@ -1723,9 +1726,12 @@ def _apply_footprint_batch_to_board_content(
             )
         x_mm = float(raw["x_mm"])
         y_mm = float(raw["y_mm"])
-        rotation_deg = float(raw.get("rotation_deg", 0.0))
+        current_rotation = float(footprint.get("rotation", 0.0) or 0.0)
+        rotation_deg = float(raw.get("rotation_deg", current_rotation))
+        rotation_delta = (rotation_deg - current_rotation + 180.0) % 360.0 - 180.0
         replacement = f"{match.group('indent')}(at {x_mm:.4f} {y_mm:.4f} {rotation_deg:.4f})"
         updated_block = block[: match.start()] + replacement + block[match.end() :]
+        updated_block = _rotate_footprint_pad_orientations(updated_block, rotation_delta)
         replacements.append((int(footprint["start"]), int(footprint["end"]), updated_block))
 
     candidate = board_content
@@ -1733,6 +1739,184 @@ def _apply_footprint_batch_to_board_content(
         candidate = candidate[:start] + updated_block + candidate[end:]
     _verify_staged_footprint_batch(candidate, arguments)
     return candidate
+
+
+def _rotate_footprint_pad_orientations(block: str, rotation_delta_deg: float) -> str:
+    """Rotate board-coordinate pad angles while preserving pad-local positions.
+
+    Pad X/Y coordinates live in the footprint's local coordinate system and
+    therefore follow the root transform automatically.  Pad orientation does
+    not: KiCad serializes it in board coordinates.  Omitting this adjustment
+    can make tall rectangular pads overlap after a 90-degree root rotation.
+    """
+    if abs(rotation_delta_deg) <= 1e-6:
+        return block
+
+    pad_at_pattern = re.compile(
+        rf"(?P<indent>[ \t]*)\(at\s+(?P<x>{FLOAT_PATTERN})\s+(?P<y>{FLOAT_PATTERN})"
+        rf"(?:\s+(?P<angle>{FLOAT_PATTERN}))?\)",
+    )
+    replacements: list[tuple[int, int, str]] = []
+    cursor = 0
+    for pad_block in _iter_blocks(block, "pad"):
+        pad_start = block.find(pad_block, cursor)
+        if pad_start < 0:
+            raise RuntimeError("could not locate parsed pad while rotating footprint")
+        cursor = pad_start + len(pad_block)
+        match = pad_at_pattern.search(pad_block)
+        if match is None:
+            raise RuntimeError("rotated footprint contains a pad without an (at ...) token")
+        current_angle = float(match.group("angle") or 0.0)
+        angle = (current_angle + rotation_delta_deg) % 360.0
+        if abs(angle - 360.0) <= 1e-6 or abs(angle) <= 1e-6:
+            angle = 0.0
+        replacement = (
+            f"{match.group('indent')}(at {match.group('x')} {match.group('y')} {angle:.4f})"
+        )
+        replacements.append(
+            (
+                pad_start + match.start(),
+                pad_start + match.end(),
+                replacement,
+            )
+        )
+
+    updated = block
+    for start, end, replacement in sorted(replacements, reverse=True):
+        updated = updated[:start] + replacement + updated[end:]
+    return updated
+
+
+def _pad_orientation_audit(board_content: str) -> dict[str, Any]:
+    """Report rotated footprints whose anisotropic pad angles may be root-only."""
+    findings: list[dict[str, Any]] = []
+    for reference, footprint in sorted(_parse_board_footprint_blocks(board_content).items()):
+        root_rotation = float(footprint.get("rotation", 0.0) or 0.0) % 360.0
+        if abs(root_rotation) <= 1e-6:
+            continue
+        pads: list[dict[str, Any]] = []
+        for pad_block in _iter_blocks(str(footprint["block"]), "pad"):
+            number = re.match(r"\(pad\s+\"([^\"]*)\"", pad_block.lstrip())
+            at = re.search(
+                rf"\(at\s+{FLOAT_PATTERN}\s+{FLOAT_PATTERN}(?:\s+({FLOAT_PATTERN}))?\)",
+                pad_block,
+            )
+            size = re.search(rf"\(size\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})\)", pad_block)
+            if not (number and at and size):
+                continue
+            width = float(size.group(1))
+            height = float(size.group(2))
+            if abs(width - height) <= 1e-6:
+                continue
+            pads.append(
+                {
+                    "number": number.group(1),
+                    "size_mm": [width, height],
+                    "stored_board_angle_deg": float(at.group(1) or 0.0) % 360.0,
+                }
+            )
+        if not pads:
+            continue
+        uncompensated = [
+            pad
+            for pad in pads
+            if abs(float(pad["stored_board_angle_deg"])) <= 1e-6
+            and abs(root_rotation % 180.0) > 1e-6
+        ]
+        findings.append(
+            {
+                "reference": reference,
+                "root_rotation_deg": root_rotation,
+                "anisotropic_pads": pads,
+                "status": "suspicious_root_only" if uncompensated else "review",
+                "reason": (
+                    "90/270-degree root with one or more zero-angle rectangular pads"
+                    if uncompensated
+                    else "nonzero root with anisotropic pads requires footprint-source review"
+                ),
+            }
+        )
+    suspicious = [item for item in findings if item["status"] == "suspicious_root_only"]
+    return {
+        "schema_version": "1.0",
+        "status": "review" if findings else "pass",
+        "summary": {
+            "rotated_footprints_with_anisotropic_pads": len(findings),
+            "suspicious_root_only": len(suspicious),
+        },
+        "findings": findings,
+    }
+
+
+def _normalize_local_pad_orientations(
+    board_content: str,
+    references: Sequence[str],
+) -> tuple[str, dict[str, int]]:
+    """Treat existing pad angles as footprint-local and convert them to board angles."""
+    footprints = _parse_board_footprint_blocks(board_content)
+    missing = sorted(set(references) - set(footprints))
+    if missing:
+        raise ValueError("missing footprint references: " + ", ".join(missing))
+    replacements: list[tuple[int, int, str]] = []
+    pad_count = 0
+    for reference in sorted(set(references)):
+        footprint = footprints[reference]
+        rotation = float(footprint.get("rotation", 0.0) or 0.0)
+        block = str(footprint["block"])
+        updated = _rotate_footprint_pad_orientations(block, rotation)
+        pad_count += sum(1 for _ in _iter_blocks(block, "pad"))
+        replacements.append((int(footprint["start"]), int(footprint["end"]), updated))
+    candidate = board_content
+    for start, end, updated in sorted(replacements, reverse=True):
+        candidate = candidate[:start] + updated + candidate[end:]
+    if _board_root_transforms(candidate) != _board_root_transforms(board_content):
+        raise RuntimeError("pad-orientation normalization changed a footprint root transform")
+    return candidate, {"footprints": len(set(references)), "pads": pad_count}
+
+
+def _run_offline_pad_orientation_normalization(
+    *,
+    root: Path,
+    before_content: str,
+    references: Sequence[str],
+    artifacts: Path,
+    source: str,
+) -> dict[str, Any]:
+    """Normalize selected pad angles in an explicit candidate and DRC-gate it."""
+    staged_content, changed = _normalize_local_pad_orientations(before_content, references)
+    diff_text = _candidate_diff_artifacts(
+        before_content=before_content,
+        staged_content=staged_content,
+        artifacts=artifacts,
+    )
+    before_drc = board_drc_evidence(root, board_content=before_content)
+    staged_drc = board_drc_evidence(root, board_content=staged_content)
+    regressions = _drc_regression_details(before_drc, staged_drc)
+    _write_drc_evidence_artifacts(artifacts, before_drc, staged_drc, regressions)
+    rejected = bool(regressions["regressed"])
+    return {
+        "schema_version": "1.0",
+        "status": "rejected" if rejected else "pass",
+        "committed": False,
+        "candidate_verified": not rejected,
+        "candidate_authority": "explicit-offline-candidate",
+        "candidate_source": source,
+        "assumption": "existing pad angles were footprint-local before normalization",
+        "changed": changed,
+        "reason": (
+            "normalized pad geometry introduces new DRC findings"
+            if rejected
+            else "normalized pad geometry passes the DRC regression gate"
+        ),
+        "before_drc": before_drc,
+        "staged_drc": staged_drc,
+        "regressions": regressions,
+        "audit": _pad_orientation_audit(staged_content),
+        "artifacts": str(artifacts),
+        "candidate": str(artifacts / "staged.kicad_pcb"),
+        "diff": str(artifacts / "edit.diff"),
+        "diff_lines": len(diff_text.splitlines()),
+    }
 
 
 def _rg_binary() -> str:
@@ -2088,6 +2272,33 @@ def build_parser() -> argparse.ArgumentParser:
     stackup.add_argument("--yes", action="store_true")
     stackup.add_argument("--artifacts", default="", metavar="DIR")
     stackup.add_argument("--format", choices=("json",), default="json")
+
+    pad_orientations = subcommands.add_parser(
+        "pad-orientations",
+        help="audit or normalize board-coordinate pad angles on an offline candidate",
+    )
+    pad_orientations.add_argument("--board-candidate", required=True, metavar="FILE")
+    pad_orientations.add_argument(
+        "--ref",
+        dest="references",
+        action="append",
+        default=[],
+        help="normalize one reviewed footprint; repeatable",
+    )
+    pad_orientations.add_argument(
+        "--all-suspicious",
+        action="store_true",
+        help="select every 90/270-degree root with zero-angle anisotropic pads",
+    )
+    pad_orientations.add_argument("--apply", action="store_true")
+    pad_orientations.add_argument(
+        "--assume-local",
+        action="store_true",
+        help="confirm selected stored pad angles are footprint-local, not already board angles",
+    )
+    pad_orientations.add_argument("--yes", action="store_true")
+    pad_orientations.add_argument("--artifacts", default="", metavar="DIR")
+    pad_orientations.add_argument("--format", choices=("json", "jsonl"), default="json")
 
     critical_placement = subcommands.add_parser(
         "critical-placement",
@@ -2619,6 +2830,84 @@ def main(argv: Sequence[str] | None = None) -> None:
                     spec_source=str(spec_path),
                 )
             print(json.dumps(report, indent=2, sort_keys=True))
+            if report["status"] == "rejected":
+                raise SystemExit(3)
+            return
+        if args.command == "pad-orientations":
+            project_root = Path(args.project_dir or ".").expanduser().resolve()
+            candidate_path = Path(args.board_candidate).expanduser()
+            if not candidate_path.is_absolute():
+                candidate_path = project_root / candidate_path
+            if not candidate_path.is_file():
+                raise ValueError(f"board candidate does not exist: {candidate_path}")
+            before_content = candidate_path.read_text(encoding="utf-8")
+            audit = _pad_orientation_audit(before_content)
+            report: dict[str, Any] = audit
+            if args.apply:
+                if args.mode not in {"write", "experimental"}:
+                    raise ValueError("--apply requires --mode write or --mode experimental")
+                if not args.yes:
+                    raise ValueError("--apply requires --yes after reviewing the audit")
+                if not args.assume_local:
+                    raise ValueError(
+                        "--apply requires --assume-local; normalization is provenance-sensitive"
+                    )
+                references = set(args.references)
+                if args.all_suspicious:
+                    references.update(
+                        str(finding["reference"])
+                        for finding in audit["findings"]
+                        if finding["status"] == "suspicious_root_only"
+                    )
+                if not references:
+                    raise ValueError("select --ref or --all-suspicious before applying")
+                artifacts = (
+                    Path(args.artifacts).expanduser().resolve()
+                    if args.artifacts
+                    else project_root
+                    / "build"
+                    / "kicadq-transactions"
+                    / "pad-orientations"
+                )
+                report = _run_offline_pad_orientation_normalization(
+                    root=project_root,
+                    before_content=before_content,
+                    references=sorted(references),
+                    artifacts=artifacts,
+                    source=str(candidate_path),
+                )
+            if args.format == "json":
+                print(json.dumps(report, indent=2, sort_keys=True))
+            elif args.apply:
+                print(
+                    json.dumps(
+                        {
+                            "section": "transaction",
+                            "status": report["status"],
+                            "reason": report["reason"],
+                            "changed": report["changed"],
+                            "candidate": report["candidate"],
+                        },
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                )
+            else:
+                print(
+                    json.dumps(
+                        {"section": "summary", "status": report["status"], **report["summary"]},
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                )
+                for finding in report["findings"]:
+                    print(
+                        json.dumps(
+                            {"section": "finding", **finding},
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        )
+                    )
             if report["status"] == "rejected":
                 raise SystemExit(3)
             return

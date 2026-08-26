@@ -354,7 +354,7 @@ def _pad_positions(footprint: JsonRecord) -> list[JsonRecord]:
     for pad in _iter_blocks(str(footprint["block"]), "pad"):
         number = re.match(rf"\(pad\s+{STRING_PATTERN}", pad.lstrip())
         at = re.search(
-            rf"\(at\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})(?:\s+{FLOAT_PATTERN})?\)", pad
+            rf"\(at\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})(?:\s+({FLOAT_PATTERN}))?\)", pad
         )
         size = re.search(rf"\(size\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})\)", pad)
         net_code, net_name = _net_identity(pad)
@@ -370,6 +370,7 @@ def _pad_positions(footprint: JsonRecord) -> list[JsonRecord]:
             {
                 "number": number.group(1),
                 "at": [round(global_x, 4), round(global_y, 4)],
+                "rotation": float(at.group(3) or 0.0),
                 "size": [float(size.group(1)), float(size.group(2))],
                 "net_code": net_code,
                 "net": net_name,
@@ -1338,6 +1339,12 @@ def project_snapshot(
     copper_layers = re.findall(
         r'^\s*\(\d+ "(?:F|B|In\d+)\.Cu" ', normalized_board_content, re.MULTILINE
     )
+    total_zones = sum(1 for _ in _iter_blocks(normalized_board_content, "zone"))
+    footprint_zones = sum(
+        sum(1 for _ in _iter_blocks(str(footprint["block"]), "zone"))
+        for footprint in parsed_footprints.values()
+    )
+    board_zones = total_zones - footprint_zones
     return {
         "schema_version": "1.1",
         "project": {"name": project.stem, "directory": str(project.parent)},
@@ -1365,11 +1372,17 @@ def project_snapshot(
             "footprints": footprints,
             "tracks": tracks,
             "vias": vias,
-            "zones": sum(1 for _ in _iter_blocks(normalized_board_content, "zone")),
+            # Preserve the historical aggregate while making it impossible to
+            # mistake footprint-owned thermal/keepout zones for board planes.
+            "zones": total_zones,
+            "board_zones": board_zones,
+            "footprint_zones": footprint_zones,
             "counts": {
                 "footprints": len(footprints),
                 "tracks": len(tracks),
                 "vias": len(vias),
+                "board_zones": board_zones,
+                "footprint_zones": footprint_zones,
                 "nets": len(board_net_names),
             },
         },

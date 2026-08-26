@@ -74,6 +74,8 @@ def _bbox_extents_from_block(block: str) -> tuple[float, float, float, float]:
     """
     xs: list[float] = []
     ys: list[float] = []
+    root_at = _parse_root_at(block)
+    root_rotation_deg = float(root_at[2]) if root_at else 0.0
 
     for rect in re.finditer(
         rf"\(fp_rect\s+\(start\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})\)\s+\(end\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})\)",
@@ -112,7 +114,11 @@ def _bbox_extents_from_block(block: str) -> tuple[float, float, float, float]:
             center_y = float(at_match.group(2))
             width = float(size_match.group(1))
             height = float(size_match.group(2))
-            angle = math.radians(float(at_match.group(3) or 0.0))
+            # Board files serialize the pad angle in board coordinates while
+            # its X/Y position remains footprint-local.  Convert the angle
+            # back to the same local frame as the rest of this bounding box;
+            # callers apply the footprint root rotation later.
+            angle = math.radians(float(at_match.group(3) or 0.0) - root_rotation_deg)
             half_width = width / 2.0
             half_height = height / 2.0
             rotated_half_width = abs(half_width * math.cos(angle)) + abs(
@@ -141,6 +147,8 @@ def _body_bbox_extents_from_block(block: str) -> tuple[float, float, float, floa
     """
     xs: list[float] = []
     ys: list[float] = []
+    root_at = _parse_root_at(block)
+    root_rotation_deg = float(root_at[2]) if root_at else 0.0
     for keyword in ("fp_rect", "fp_line", "fp_circle"):
         for graphic in _iter_blocks(block, keyword):
             layer_match = re.search(r'\(layer\s+"([FB]\.Fab)"\)', graphic)
@@ -188,7 +196,7 @@ def _body_bbox_extents_from_block(block: str) -> tuple[float, float, float, floa
         center_y = float(at_match.group(2))
         half_width = float(size_match.group(1)) / 2.0
         half_height = float(size_match.group(2)) / 2.0
-        angle = math.radians(float(at_match.group(3) or 0.0))
+        angle = math.radians(float(at_match.group(3) or 0.0) - root_rotation_deg)
         rotated_half_width = abs(half_width * math.cos(angle)) + abs(
             half_height * math.sin(angle)
         )

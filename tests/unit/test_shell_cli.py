@@ -32,6 +32,8 @@ from kicad_mcp.shell_cli import (
     _emit_records,
     _erc_finding_keys,
     _native_move_footprints_batch,
+    _normalize_local_pad_orientations,
+    _pad_orientation_audit,
     _placement_batch_requires_guarded_file,
     _render_candidate_track,
     _resolve_edit_schematic,
@@ -45,7 +47,7 @@ from kicad_mcp.shell_cli import (
     result_envelope,
     run_native_board_transaction,
 )
-from kicad_mcp.tools.board_file import _courtyard_polygons_from_block
+from kicad_mcp.tools.board_file import _courtyard_polygons_from_block, _parse_board_footprint_blocks
 
 
 def test_silk_cleanup_demotes_reference_without_moving_footprint_root() -> None:
@@ -104,6 +106,27 @@ def test_concave_polygon_collision_does_not_use_one_full_bounding_box() -> None:
 
     assert _polygons_overlap(tee, open_side) is False
     assert _polygons_overlap(tee, body_overlap) is True
+
+
+def test_footprint_bbox_converts_board_pad_angle_back_to_local_frame() -> None:
+    def footprint(root_rotation: int, pad_rotation: int) -> dict[str, object]:
+        board = f"""(kicad_pcb
+          (footprint "Test"
+            (layer "F.Cu")
+            (at 10 10 {root_rotation})
+            (property "Reference" "U1")
+            (pad "1" smd rect (at 0 0 {pad_rotation}) (size 1 3) (layers "F.Cu"))
+          )
+        )"""
+        return _parse_board_footprint_blocks(board)["U1"]
+
+    unrotated = footprint(0, 0)
+    rigidly_rotated = footprint(90, 90)
+    root_only_rotation = footprint(90, 0)
+
+    assert (unrotated["width_mm"], unrotated["height_mm"]) == (1.0, 3.0)
+    assert (rigidly_rotated["width_mm"], rigidly_rotated["height_mm"]) == (1.0, 3.0)
+    assert (root_only_rotation["width_mm"], root_only_rotation["height_mm"]) == (3.0, 1.0)
 
 
 def test_drc_regression_ignores_item_order_and_unconnected_pair_churn() -> None:
@@ -228,12 +251,14 @@ def test_staged_footprint_batch_verifies_serialized_position_and_rotation() -> N
     )
 
 
-def test_offline_footprint_batch_changes_only_requested_root_transform() -> None:
+def test_offline_footprint_batch_rotates_root_and_board_coordinate_pad_angles() -> None:
     content = """(kicad_pcb
       (footprint "Test"
         (layer "F.Cu")
         (at 1 2 0)
         (property "Reference" "U1" (at 0 0 0) (layer "F.SilkS"))
+        (pad "1" smd rect (at -1 0) (size 1 3) (layers "F.Cu"))
+        (pad "2" smd rect (at 1 0 45) (size 1 3) (layers "F.Cu"))
         (fp_rect (start -1 -1) (end 1 1) (stroke (width 0.05) (type solid))
           (fill no) (layer "F.CrtYd"))
       )
@@ -245,7 +270,66 @@ def test_offline_footprint_batch_changes_only_requested_root_transform() -> None
     )
 
     assert "(at 10.0000 12.0000 90.0000)" in candidate
+    assert '(pad "1" smd rect (at -1 0 90.0000)' in candidate
+    assert '(pad "2" smd rect (at 1 0 135.0000)' in candidate
     assert '(property "Reference" "U1" (at 0 0 0)' in candidate
+
+
+def test_offline_footprint_translation_does_not_change_pad_angles() -> None:
+    content = """(kicad_pcb
+      (footprint "Test"
+        (layer "F.Cu")
+        (at 1 2 90)
+        (property "Reference" "U1" (at 0 0 0) (layer "F.SilkS"))
+        (pad "1" smd rect (at -1 0 90) (size 1 3) (layers "F.Cu"))
+      )
+    )"""
+
+    candidate = _apply_footprint_batch_to_board_content(
+        content,
+        {"placements": [{"reference": "U1", "x_mm": 10, "y_mm": 12, "rotation_deg": 90}]},
+    )
+
+    assert '(pad "1" smd rect (at -1 0 90)' in candidate
+
+
+def test_rigid_footprint_verification_accepts_expected_pad_angle_delta() -> None:
+    expected = """(kicad_pcb
+      (footprint "Test"
+        (layer "F.Cu")
+        (at 1 2 0)
+        (property "Reference" "U1" (at 0 0 0) (layer "F.SilkS"))
+        (pad "1" smd rect (at -1 0) (size 1 3) (layers "F.Cu"))
+      )
+    )"""
+    arguments = {
+        "placements": [{"reference": "U1", "x_mm": 10, "y_mm": 12, "rotation_deg": 90}]
+    }
+    observed = _apply_footprint_batch_to_board_content(expected, arguments)
+
+    _verify_rigid_footprint_children(expected, observed, arguments)
+
+
+def test_pad_orientation_audit_and_explicit_local_normalization() -> None:
+    content = """(kicad_pcb
+      (footprint "Test"
+        (layer "F.Cu")
+        (at 10 12 90)
+        (property "Reference" "L1")
+        (pad "1" smd rect (at -1 0) (size 1 3) (layers "F.Cu"))
+        (pad "2" smd rect (at 1 0) (size 1 3) (layers "F.Cu"))
+      )
+    )"""
+
+    audit = _pad_orientation_audit(content)
+    candidate, changed = _normalize_local_pad_orientations(content, ["L1"])
+
+    assert audit["summary"]["suspicious_root_only"] == 1
+    assert audit["findings"][0]["status"] == "suspicious_root_only"
+    assert changed == {"footprints": 1, "pads": 2}
+    assert candidate.count("(at -1 0 90.0000)") == 1
+    assert candidate.count("(at 1 0 90.0000)") == 1
+    assert _parse_board_footprint_blocks(candidate)["L1"]["rotation"] == 90
 
 
 def test_rigid_footprint_verification_rejects_embedded_zone_drift() -> None:
@@ -704,6 +788,27 @@ def test_pad_rotation_uses_kicad_board_coordinate_direction() -> None:
     pad = _pad_positions(footprint)[0]
 
     assert pad["at"] == [80.32, 113.96]
+    assert pad["rotation"] == 0.0
+
+
+def test_pad_rotation_is_reported_as_board_coordinate_angle() -> None:
+    from kicad_mcp.deep_inspection import _pad_positions
+
+    footprint = {
+        "x_mm": 60.0,
+        "y_mm": 116.5,
+        "rotation": 90.0,
+        "layer_name": "F.Cu",
+        "block": """(footprint "Header"
+          (at 60 116.5 90)
+          (property "Reference" "J10")
+          (pad "1" smd rect (at 2.54 0 90) (size 1 3)
+            (layers "F.Cu") (net 1 "PWR")))""",
+    }
+
+    pad = _pad_positions(footprint)[0]
+
+    assert pad["rotation"] == 90.0
 
 
 def test_connectivity_proof_expands_pin_net_and_peer_evidence() -> None:

@@ -190,6 +190,36 @@ the destination. The DRC gate rejects every new physical finding and any increas
 in the unrouted-item count; a lower total violation count cannot hide a newly
 introduced problem.
 
+## Pad-orientation audit and repair
+
+KiCad board files keep pad X/Y in the footprint-local frame but serialize the
+pad's facing angle in board coordinates. A root-only 90° transform can therefore
+move rectangular pad centres while leaving their copper facing the old way.
+`pad-orientations` makes that otherwise subtle state visible in JSON.
+
+```bash
+kicadq -C ./board pad-orientations \
+  --board-candidate output/placement/staged.kicad_pcb |
+  jq '{summary,suspicious:[.findings[]|select(.status=="suspicious_root_only")|.reference]}'
+```
+
+Repair is deliberately provenance-sensitive and candidate-only. It requires an
+explicit statement that the selected stored pad angles are footprint-local,
+then rotates those child angles by the existing root angle, proves that no root
+transform changed, and runs the same KiCad DRC regression gate.
+
+```bash
+kicadq -C ./board --mode write pad-orientations \
+  --board-candidate output/placement/staged.kicad_pcb \
+  --all-suspicious --ref L2 --assume-local \
+  --apply --yes --artifacts output/pad-corrected |
+  jq '{status,changed,regressions,candidate}'
+```
+
+Do not use `--assume-local` on an arbitrary third-party board. A zero-degree
+rectangular pad under a rotated root can be intentional; compare the board with
+its footprint library or known generation history first.
+
 ## Pad-aware power-loop inspection and placement
 
 `power-loops` checks declared IC/capacitor groups using the actual power-pad and
