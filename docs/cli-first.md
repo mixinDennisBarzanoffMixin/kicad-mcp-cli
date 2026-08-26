@@ -172,6 +172,11 @@ and hierarchical-sheet cluster regions. Explicit command-line placement options
 override those stored defaults, so a reviewed floorplan is reproducible with one
 short command while experiments remain possible.
 
+Absolute anchors accept an optional local envelope margin as
+`--at REF,X,Y,ROTATION,MARGIN`. This keeps a broad comfort margin between
+unrelated parts while allowing an exact, DRC-checked decoupler courtyard to sit
+close to its IC.
+
 ```bash
 kicadq -C ./board place --fix J1 --fix J2 --keepout 0,0,25,12 | jq '.placements'
 kicadq -C ./board place --spec .kicad-mcp/project_spec.json | jq '.quality_gate'
@@ -197,6 +202,8 @@ kicadq -C ./board power-loops --ref U1 --format json |
   jq '.groups[] | {ic_ref,status,members}'
 kicadq -C ./board power-loops --format jsonl |
   jq -c 'select(.section == "member" and .status != "pass")'
+kicadq -C ./board power-loops --board-candidate output/floorplan/staged.kicad_pcb |
+  jq '.summary'
 ```
 
 `place-power-loops` searches grid-aligned capacitor root transforms around each
@@ -210,9 +217,18 @@ search reports the blocking footprint references and hit counts.
 
 ```bash
 kicadq -C ./board place-power-loops --ref U1 | jq '.placements,.after.groups'
+kicadq -C ./board place-power-loops --board-candidate output/floorplan/staged.kicad_pcb |
+  jq '{status,after:.after.summary,unresolved}'
 kicadq -C ./board --mode write place-power-loops --ref U1 \
   --apply --yes --artifacts output/u1-placement | jq '.transaction'
 ```
+
+`inspect`, `power-loops`, and `place-power-loops` accept `--board-candidate FILE`
+for Unix-style offline pipelines. A diagnostic `--yield-ref REF` reports the
+critical placement that becomes possible when lower-priority blockers yield;
+it cannot be applied directly. Applying a planned power-loop refinement to an
+explicit candidate creates a second offline candidate transaction and never
+touches the saved/live board.
 
 An apply request never writes optimistically. It first constructs an offline
 candidate from the saved board, verifies every requested root transform and all

@@ -844,6 +844,59 @@ def _run_offline_placement_candidate(
     }
 
 
+def _run_offline_candidate_refinement(
+    *,
+    root: Path,
+    before_content: str,
+    operations: list[tuple[str, dict[str, Any]]],
+    artifacts: Path,
+    source: str,
+) -> dict[str, Any]:
+    """Refine an explicit offline candidate without touching saved/live KiCad."""
+    staged_content = before_content
+    for _tool_name, arguments in operations:
+        staged_content = _apply_footprint_batch_to_board_content(staged_content, arguments)
+        _verify_staged_footprint_batch(staged_content, arguments)
+        _verify_rigid_footprint_children(before_content, staged_content, arguments)
+    artifacts.mkdir(parents=True, exist_ok=True)
+    (artifacts / "before.kicad_pcb").write_text(before_content, encoding="utf-8")
+    (artifacts / "staged.kicad_pcb").write_text(staged_content, encoding="utf-8")
+    diff_text = "".join(
+        difflib.unified_diff(
+            before_content.splitlines(keepends=True),
+            staged_content.splitlines(keepends=True),
+            fromfile="before.kicad_pcb",
+            tofile="staged.kicad_pcb",
+        )
+    )
+    (artifacts / "edit.diff").write_text(diff_text, encoding="utf-8")
+    before_drc = board_drc_evidence(root, board_content=before_content)
+    staged_drc = board_drc_evidence(root, board_content=staged_content)
+    regressions = _drc_regression_details(before_drc, staged_drc)
+    _write_drc_evidence_artifacts(artifacts, before_drc, staged_drc, regressions)
+    rejected = bool(regressions["regressed"])
+    return {
+        "schema_version": "1.0",
+        "status": "rejected" if rejected else "pass",
+        "committed": False,
+        "candidate_verified": not rejected,
+        "candidate_authority": "explicit-offline-candidate",
+        "candidate_source": source,
+        "reason": (
+            "refined candidate introduces new DRC findings"
+            if rejected
+            else "refined offline candidate passes the DRC regression gate"
+        ),
+        "before_drc": before_drc,
+        "staged_drc": staged_drc,
+        "regressions": regressions,
+        "artifacts": str(artifacts),
+        "candidate": str(artifacts / "staged.kicad_pcb"),
+        "diff": str(artifacts / "edit.diff"),
+        "diff_lines": len(diff_text.splitlines()),
+    }
+
+
 async def _run_native_board_transaction(
     args: argparse.Namespace,
     operations: list[tuple[str, dict[str, Any]]],
@@ -1537,6 +1590,12 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.add_argument("--sheet", default="", help="filter by hierarchical sheet substring")
     inspect.add_argument("--net", default="", help="filter by net-name substring")
     inspect.add_argument("--ref", dest="reference", default="", help="filter by exact reference")
+    inspect.add_argument(
+        "--board-candidate",
+        default="",
+        metavar="FILE",
+        help="inspect an offline .kicad_pcb candidate instead of the saved board",
+    )
     inspect.add_argument("--format", choices=("json", "jsonl"), default="json")
 
     prove = subcommands.add_parser(
@@ -1723,8 +1782,8 @@ def build_parser() -> argparse.ArgumentParser:
         dest="absolute_anchors",
         action="append",
         default=[],
-        metavar="REF,X,Y[,ROTATION]",
-        help="anchor a footprint at an absolute board coordinate; repeatable",
+        metavar="REF,X,Y[,ROTATION[,MARGIN]]",
+        help="anchor a footprint at an absolute coordinate with optional local margin",
     )
     place.add_argument(
         "--keepout",
@@ -1766,6 +1825,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="project-relative design-intent JSON containing decoupling_pairs",
     )
     power_loops.add_argument("--ref", dest="reference", default="", help="one host IC ref")
+    power_loops.add_argument(
+        "--board-candidate",
+        default="",
+        metavar="FILE",
+        help="inspect an offline .kicad_pcb candidate instead of the saved board",
+    )
     power_loops.add_argument("--format", choices=("json", "jsonl", "text"), default="text")
 
     place_power_loops = subcommands.add_parser(
@@ -1778,9 +1843,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="project-relative design-intent JSON containing decoupling_pairs",
     )
     place_power_loops.add_argument("--ref", dest="reference", default="", help="one host IC ref")
+    place_power_loops.add_argument(
+        "--board-candidate",
+        default="",
+        metavar="FILE",
+        help="plan against an offline .kicad_pcb candidate instead of the saved board",
+    )
     place_power_loops.add_argument("--grid", type=float, default=0.25, dest="grid_mm")
     place_power_loops.add_argument(
         "--margin", type=float, default=0.0, dest="courtyard_margin_mm"
+    )
+    place_power_loops.add_argument(
+        "--yield-ref",
+        action="append",
+        default=[],
+        dest="yield_references",
+        help="diagnostically let a lower-priority footprint yield its occupied space",
     )
     place_power_loops.add_argument("--apply", action="store_true")
     place_power_loops.add_argument("--yes", action="store_true")
@@ -1835,8 +1913,22 @@ def main(argv: Sequence[str] | None = None) -> None:
                 raise SystemExit(1)
             return
         if args.command == "inspect":
+            project_root = Path(args.project_dir or ".").expanduser().resolve()
+            candidate_path = (
+                Path(args.board_candidate).expanduser() if args.board_candidate else None
+            )
+            if candidate_path is not None and not candidate_path.is_absolute():
+                candidate_path = project_root / candidate_path
             snapshot = filter_snapshot(
-                project_snapshot(args.project_dir or "."),
+                project_snapshot(
+                    project_root,
+                    board_content=(
+                        candidate_path.read_text(encoding="utf-8")
+                        if candidate_path is not None
+                        else None
+                    ),
+                    board_source=str(candidate_path) if candidate_path is not None else "",
+                ),
                 sheet=args.sheet,
                 net=args.net,
                 reference=args.reference,
@@ -2069,8 +2161,22 @@ def main(argv: Sequence[str] | None = None) -> None:
             raw_pairs = spec.get("decoupling_pairs", [])
             if not isinstance(raw_pairs, list):
                 raise ValueError(f"{spec_path}: decoupling_pairs must be a JSON array")
+            candidate_path = (
+                Path(args.board_candidate).expanduser() if args.board_candidate else None
+            )
+            if candidate_path is not None and not candidate_path.is_absolute():
+                candidate_path = project_root / candidate_path
+            snapshot = project_snapshot(
+                project_root,
+                board_content=(
+                    candidate_path.read_text(encoding="utf-8")
+                    if candidate_path is not None
+                    else None
+                ),
+                board_source=str(candidate_path) if candidate_path is not None else "",
+            )
             report = power_loop_report(
-                project_snapshot(project_root),
+                snapshot,
                 [cast(dict[str, Any], pair) for pair in raw_pairs if isinstance(pair, dict)],
                 reference=args.reference,
             )
@@ -2106,14 +2212,34 @@ def main(argv: Sequence[str] | None = None) -> None:
             raw_pairs = spec.get("decoupling_pairs", [])
             if not isinstance(raw_pairs, list):
                 raise ValueError(f"{spec_path}: decoupling_pairs must be a JSON array")
+            candidate_path = (
+                Path(args.board_candidate).expanduser() if args.board_candidate else None
+            )
+            if candidate_path is not None and not candidate_path.is_absolute():
+                candidate_path = project_root / candidate_path
+            snapshot = project_snapshot(
+                project_root,
+                board_content=(
+                    candidate_path.read_text(encoding="utf-8")
+                    if candidate_path is not None
+                    else None
+                ),
+                board_source=str(candidate_path) if candidate_path is not None else "",
+            )
             plan = power_loop_placement_plan(
-                project_snapshot(project_root),
+                snapshot,
                 [cast(dict[str, Any], pair) for pair in raw_pairs if isinstance(pair, dict)],
                 reference=args.reference,
                 grid_mm=args.grid_mm,
                 courtyard_margin_mm=args.courtyard_margin_mm,
+                yield_references=args.yield_references,
             )
             if args.apply:
+                if args.yield_references:
+                    raise ValueError(
+                        "--yield-ref is diagnostic only; relocate yielded footprints in the "
+                        "composite floorplan before applying"
+                    )
                 if args.mode not in {"write", "experimental"}:
                     raise ValueError("--apply requires --mode write or --mode experimental")
                 if not args.yes:
@@ -2129,13 +2255,33 @@ def main(argv: Sequence[str] | None = None) -> None:
                     }
                     for placement in plan["placements"]
                 ]
-                transaction = asyncio.run(
-                    run_native_board_transaction(
-                        args,
-                        [("_native_move_footprints_batch", {"placements": native_placements})],
-                        label="placement",
+                operations = [
+                    ("_native_move_footprints_batch", {"placements": native_placements})
+                ]
+                if candidate_path is not None:
+                    artifacts = (
+                        Path(args.artifacts).expanduser().resolve()
+                        if args.artifacts
+                        else project_root
+                        / "build"
+                        / "kicadq-transactions"
+                        / "power-loop-refine"
                     )
-                )
+                    transaction = _run_offline_candidate_refinement(
+                        root=project_root,
+                        before_content=candidate_path.read_text(encoding="utf-8"),
+                        operations=operations,
+                        artifacts=artifacts,
+                        source=str(candidate_path),
+                    )
+                else:
+                    transaction = asyncio.run(
+                        run_native_board_transaction(
+                            args,
+                            operations,
+                            label="placement",
+                        )
+                    )
                 plan["transaction"] = transaction
                 if transaction["status"] in {"rejected", "blocked"}:
                     plan["status"] = transaction["status"]
@@ -2261,8 +2407,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 anchors.append(anchor)
             for raw in args.absolute_anchors:
                 values = [value.strip() for value in raw.split(",")]
-                if len(values) not in {3, 4}:
-                    raise ValueError("--at requires REF,X,Y[,ROTATION]")
+                if len(values) not in {3, 4, 5}:
+                    raise ValueError("--at requires REF,X,Y[,ROTATION[,MARGIN]]")
                 anchor = {
                     "reference": values[0],
                     "x_mm": float(values[1]),
@@ -2270,6 +2416,9 @@ def main(argv: Sequence[str] | None = None) -> None:
                 }
                 if len(values) == 4:
                     anchor["rotation"] = float(values[3])
+                elif len(values) == 5:
+                    anchor["rotation"] = float(values[3])
+                    anchor["margin_mm"] = float(values[4])
                 anchors.append(anchor)
             if not anchors:
                 anchors = [

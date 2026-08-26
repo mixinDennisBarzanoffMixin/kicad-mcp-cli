@@ -793,6 +793,7 @@ def power_loop_placement_plan(
     reference: str = "",
     grid_mm: float = 0.25,
     courtyard_margin_mm: float = 0.0,
+    yield_references: Iterable[str] = (),
 ) -> JsonRecord:
     """Plan capacitor root transforms around matching host power pads.
 
@@ -804,6 +805,7 @@ def power_loop_placement_plan(
     if grid_mm <= 0.0:
         raise ValueError("grid_mm must be greater than zero")
     pair_list = [dict(pair) for pair in decoupling_pairs]
+    yielded_refs = {str(reference) for reference in yield_references}
     before = power_loop_report(snapshot, pair_list, reference=reference)
     footprints = {
         str(item.get("reference", "")): item
@@ -820,15 +822,20 @@ def power_loop_placement_plan(
             "before": before,
         }
     board_bounds = tuple(float(value) for value in board_bounds_raw)
-    failing_refs = {
+    failing_hosts = {
+        str(group["host_reference"])
+        for group in before["groups"]
+        if group["status"] != "pass"
+    }
+    movable_cap_refs = {
         str(member["reference"])
         for group in before["groups"]
+        if str(group["host_reference"]) in failing_hosts
         for member in group["members"]
-        if member["status"] != "pass"
     }
     occupied: list[tuple[str, list[list[tuple[float, float]]]]] = []
     for footprint_ref, footprint in footprints.items():
-        if footprint_ref in failing_refs:
+        if footprint_ref in movable_cap_refs or footprint_ref in yielded_refs:
             continue
         occupied.append(
             (
@@ -844,8 +851,21 @@ def power_loop_placement_plan(
 
     placements: list[JsonRecord] = []
     unresolved: list[JsonRecord] = []
+    search_diagnostics: list[JsonRecord] = []
     group_by_host = {str(group["host_reference"]): group for group in before["groups"]}
-    for pair in pair_list:
+    ordered_pairs = sorted(
+        pair_list,
+        key=lambda pair: (
+            -len(pair.get("cap_refs", [])),
+            -sum(
+                float(footprints.get(str(cap_ref), {}).get("width_mm", 0.0))
+                * float(footprints.get(str(cap_ref), {}).get("height_mm", 0.0))
+                for cap_ref in pair.get("cap_refs", [])
+            ),
+            str(pair.get("ic_ref", "")),
+        ),
+    )
+    for pair in ordered_pairs:
         host_ref = str(pair.get("ic_ref", ""))
         if reference and host_ref != reference:
             continue
@@ -853,6 +873,8 @@ def power_loop_placement_plan(
         group = group_by_host.get(host_ref)
         if host is None or group is None:
             unresolved.append({"reference": host_ref, "reason": "host footprint is missing"})
+            continue
+        if group["status"] == "pass":
             continue
         member_by_ref = {str(member["reference"]): member for member in group["members"]}
         max_distance_mm = float(pair.get("max_distance_mm", 3.0))
@@ -873,8 +895,6 @@ def power_loop_placement_plan(
         ] = []
         for cap_ref in ordered_cap_refs:
             member = member_by_ref.get(cap_ref)
-            if member is not None and member.get("status") == "pass":
-                continue
             cap = footprints.get(cap_ref)
             if cap is None or member is None or member.get("forward") is None:
                 unresolved.append(
@@ -1038,6 +1058,19 @@ def power_loop_placement_plan(
                                         candidate_polygons,
                                     )
                                 )
+            search_diagnostics.append(
+                {
+                    "reference": cap_ref,
+                    "host_reference": host_ref,
+                    "rail": rail,
+                    "in_bounds_transforms_checked": in_bounds_transforms,
+                    "collision_free_candidates": len(candidates),
+                    "blocking_footprints": [
+                        {"reference": blocker, "hits": hits}
+                        for blocker, hits in blocker_hits.most_common(12)
+                    ],
+                }
+            )
             if not candidates:
                 unresolved.append(
                     {
@@ -1078,7 +1111,7 @@ def power_loop_placement_plan(
                     float(item[1]["to"][0]),
                     float(item[1]["rotation"]),
                 ),
-            )[:256]
+            )[:1024]
             group_candidates.append((cap_ref, ranked_candidates))
 
         # Capacitors around one IC are a coupled placement problem. A greedy
@@ -1122,6 +1155,21 @@ def power_loop_placement_plan(
                         "reference": cap_ref,
                         "host_reference": host_ref,
                         "reason": "no collision-free complete capacitor-cluster packing was found",
+                        "candidate_counts": {
+                            reference: len(cap_candidates)
+                            for reference, cap_candidates in group_candidates
+                        },
+                        "candidate_samples": {
+                            reference: [
+                                {
+                                    "to": candidate[1]["to"],
+                                    "rotation": candidate[1]["rotation"],
+                                    "score": round(candidate[0], 4),
+                                }
+                                for candidate in cap_candidates[:12]
+                            ]
+                            for reference, cap_candidates in group_candidates
+                        },
                     }
                 )
                 packing_failed = True
@@ -1140,7 +1188,7 @@ def power_loop_placement_plan(
                     ),
                 )
             )
-            beam = next_beam[:512]
+            beam = next_beam[:2048]
         if group_candidates and not packing_failed:
             _score, selected_items, _selected_polygons = beam[0]
             for cap_ref, selected, selected_polygons in selected_items:
@@ -1178,18 +1226,40 @@ def power_loop_placement_plan(
         "courtyard_margin_mm": courtyard_margin_mm,
         "placements": placements,
         "unresolved": unresolved,
+        "search_diagnostics": search_diagnostics,
+        "yielded_references": sorted(yielded_refs),
+        "requires_relocation": sorted(yielded_refs),
         "before": before,
         "after": after,
     }
 
 
-def project_snapshot(project_dir: str | Path) -> JsonRecord:
+def project_snapshot(
+    project_dir: str | Path,
+    *,
+    board_content: str | None = None,
+    board_source: str = "",
+) -> JsonRecord:
     """Return one complete file-backed snapshot of a KiCad project."""
     project, schematic, board = _project_files(project_dir)
     sheets, components, nets = _schematic_snapshot(_export_netlist(schematic))
-    board_content = _normalize_board_content(board.read_text(encoding="utf-8", errors="ignore"))
-    live_board = _live_board_probe(project, board_content)
-    parsed_footprints = _parse_board_footprint_blocks(board_content)
+    candidate_supplied = board_content is not None
+    normalized_board_content = _normalize_board_content(
+        board_content
+        if board_content is not None
+        else board.read_text(encoding="utf-8", errors="ignore")
+    )
+    live_board = (
+        {
+            "status": "not-applicable",
+            "authority": "offline-candidate",
+            "semantic_match": None,
+            "source": board_source or "supplied board content",
+        }
+        if candidate_supplied
+        else _live_board_probe(project, normalized_board_content)
+    )
+    parsed_footprints = _parse_board_footprint_blocks(normalized_board_content)
     footprints: list[JsonRecord] = []
     for reference, raw in sorted(parsed_footprints.items()):
         footprint = {
@@ -1200,18 +1270,22 @@ def project_snapshot(project_dir: str | Path) -> JsonRecord:
         footprint["reference"] = reference
         footprint["pads"] = _pad_positions(raw)
         footprints.append(footprint)
-    tracks = _track_records(board_content)
-    vias = _via_records(board_content)
+    tracks = _track_records(normalized_board_content)
+    vias = _via_records(normalized_board_content)
     board_nets = {
         int(code): name
-        for code, name in re.findall(rf"\(net\s+(\d+)\s+{STRING_PATTERN}\)", board_content)
+        for code, name in re.findall(
+            rf"\(net\s+(\d+)\s+{STRING_PATTERN}\)", normalized_board_content
+        )
     }
     for track in tracks:
         track["net"] = board_nets.get(int(track["net_code"]), "")
     for via in vias:
         via["net"] = board_nets.get(int(via["net_code"]), "")
-    bounds = _edge_cuts_bounds(board_content)
-    copper_layers = re.findall(r'^\s*\(\d+ "(?:F|B|In\d+)\.Cu" ', board_content, re.MULTILINE)
+    bounds = _edge_cuts_bounds(normalized_board_content)
+    copper_layers = re.findall(
+        r'^\s*\(\d+ "(?:F|B|In\d+)\.Cu" ', normalized_board_content, re.MULTILINE
+    )
     return {
         "schema_version": "1.1",
         "project": {"name": project.stem, "directory": str(project.parent)},
@@ -1229,14 +1303,17 @@ def project_snapshot(project_dir: str | Path) -> JsonRecord:
             },
         },
         "board": {
-            "authority": "file-backed-kicad-pcb",
+            "authority": "offline-candidate-kicad-pcb"
+            if candidate_supplied
+            else "file-backed-kicad-pcb",
+            "source": board_source or str(board),
             "live_ipc": live_board,
             "bounds_mm": list(bounds) if bounds else None,
             "copper_layers": len(copper_layers),
             "footprints": footprints,
             "tracks": tracks,
             "vias": vias,
-            "zones": sum(1 for _ in _iter_blocks(board_content, "zone")),
+            "zones": sum(1 for _ in _iter_blocks(normalized_board_content, "zone")),
             "counts": {
                 "footprints": len(footprints),
                 "tracks": len(tracks),
@@ -2276,13 +2353,16 @@ def placement_plan(
         origin_dx, origin_dy, geometry_width, geometry_height = rotated_geometry(
             item, rotation_by_ref[reference]
         )
+        component_margin_mm = float(
+            anchor_by_ref.get(reference, {}).get("margin_mm", margin_mm)
+        )
         components.append(
             PlacementComponent(
                 ref=reference,
                 x=float(item["x_mm"]) - left + origin_dx,
                 y=float(item["y_mm"]) - top + origin_dy,
-                w=geometry_width + margin_mm,
-                h=geometry_height + margin_mm,
+                w=geometry_width + component_margin_mm,
+                h=geometry_height + component_margin_mm,
                 fixed=reference in fixed,
                 origin_dx=origin_dx,
                 origin_dy=origin_dy,
@@ -2351,6 +2431,7 @@ def placement_plan(
                 "edge": edge,
                 "offset_mm": offset,
                 "rotation": rotation_by_ref[reference],
+                "margin_mm": float(anchor.get("margin_mm", margin_mm)),
                 "position_mm": [
                     round(component.x - component.origin_dx + left, 4),
                     round(component.y - component.origin_dy + top, 4),
@@ -2440,7 +2521,7 @@ def placement_plan(
             # A dedicated two-node spring prevents a global rail such as GND,
             # +3V3, or LTE_3V8 from pulling a decoupler toward the rail centroid.
             # Repulsion and the legalizer still enforce physical separation.
-            weight = max(12.0, min(40.0, 72.0 / max(max_distance_mm, 1.0)))
+            weight = max(80.0, min(200.0, 800.0 / max(max_distance_mm, 1.0)))
             nets.append(
                 PlacementNet(
                     name=f"@proximity:{host_ref}:{cap_ref}",
