@@ -73,7 +73,7 @@ def test_kicad_session_builds_supported_kwargs_and_resets(tmp_path: Path, fake_c
     assert isinstance(client, FakeClient)
     assert client.socket_path == str(tmp_path / "api.sock")
     assert client.kicad_token == credential
-    assert client.client_name == "kicad-mcp"
+    assert client.client_name.startswith("kicad-mcp-")
     assert client.timeout_ms == 2500
     assert session.client() is client
 

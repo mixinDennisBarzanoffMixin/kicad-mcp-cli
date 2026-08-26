@@ -11,6 +11,7 @@ from kicad_mcp.utils.placement import (
     _snap,
     force_directed_placement,
     generate_bga_fanout_plan,
+    legalize_placement,
 )
 
 
@@ -124,6 +125,30 @@ def test_force_directed_placement_respects_keepout_regions() -> None:
         or placed.y + 2.0 <= 8.0
         or placed.y - 2.0 >= 12.0
     )
+
+
+def test_legalize_placement_removes_overlaps_and_preserves_fixed_anchor() -> None:
+    components = [
+        PlacementComponent("J1", 2.0, 2.0, w=2.0, h=2.0, fixed=True),
+        PlacementComponent("U1", 2.0, 2.0, w=4.0, h=4.0),
+        PlacementComponent("C1", 2.0, 2.0, w=2.0, h=2.0),
+    ]
+    stats: dict[str, object] = {}
+
+    placed = legalize_placement(
+        components,
+        ForceDirectedConfig(board_w=20.0, board_h=20.0, grid_mm=0.5),
+        stats=stats,
+    )
+
+    by_ref = {component.ref: component for component in placed}
+    assert (by_ref["J1"].x, by_ref["J1"].y) == (2.0, 2.0)
+    assert stats["legalized_unresolved"] == []
+    for index, component in enumerate(placed):
+        for other in placed[index + 1 :]:
+            assert abs(component.x - other.x) >= (component.w + other.w) / 2 or abs(
+                component.y - other.y
+            ) >= (component.h + other.h) / 2
 
 
 def test_board_placement_net_weights_prioritize_power_and_differential_pairs() -> None:

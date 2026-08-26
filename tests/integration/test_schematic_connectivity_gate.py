@@ -392,3 +392,23 @@ async def test_schematic_connectivity_gate_flags_component_contract_violation(
     assert "Matched component contracts: 1" in text
     assert "Component contract violations: 1" in text
     assert "esp32_s3_wroom_1" in text
+
+
+@pytest.mark.parametrize(
+    ("net_name", "option", "matches"),
+    [
+        ("/ESP32_USB_Debug/ESP_3V3", "+3V3", True),
+        ("/ESP32_USB_Debug/VBUS_USB", "VBUS", True),
+        ("/A7670_SIM_RF/MODEM_USB_VBUS", "VBUS", True),
+        ("/Power/3V3A", "+3V3", False),
+        ("/Power/NOTVBUS", "VBUS", False),
+    ],
+)
+def test_component_contract_net_matching_uses_whole_hierarchical_tokens(
+    net_name: str,
+    option: str,
+    matches: bool,
+) -> None:
+    from kicad_mcp.tools.validation import _contract_net_option_matches
+
+    assert _contract_net_option_matches(net_name, option) is matches

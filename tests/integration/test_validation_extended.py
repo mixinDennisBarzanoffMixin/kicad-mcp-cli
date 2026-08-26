@@ -492,6 +492,42 @@ async def test_schematic_quality_gate_fail(sample_project: Path, monkeypatch) ->
 
 
 @pytest.mark.anyio
+async def test_schematic_quality_gate_warns_without_blocking_on_warning_only_report(
+    sample_project: Path,
+    monkeypatch,
+) -> None:
+    def fake_run_erc(report_name: str) -> tuple[Path, dict | None, str | None]:
+        report_path = sample_project / "output" / report_name
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report = {
+            "sheets": [
+                {
+                    "path": "/",
+                    "violations": [
+                        {
+                            "severity": "warning",
+                            "type": "lib_symbol_mismatch",
+                            "description": "Cached symbol differs from library",
+                        }
+                    ],
+                }
+            ]
+        }
+        report_path.write_text(json.dumps(report), encoding="utf-8")
+        return report_path, report, None
+
+    monkeypatch.setattr("kicad_mcp.tools.validation._run_erc_report", fake_run_erc)
+    server = build_server("full")
+    await call_tool_text(server, "kicad_set_project", {"project_dir": str(sample_project)})
+
+    result = await call_tool_text(server, "schematic_quality_gate", {})
+
+    assert "Schematic quality gate: WARN" in result
+    assert "ERC errors: 0" in result
+    assert "ERC warnings: 1" in result
+
+
+@pytest.mark.anyio
 async def test_connectivity_gate_joins_same_named_labels(sample_project: Path, monkeypatch) -> None:
     """Same-named labels represent one net even when drawn at separate points."""
 

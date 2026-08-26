@@ -740,14 +740,28 @@ async def run_native_board_transaction(
     before_drc = board_drc_evidence(root, board_content=before_content)
     results: list[dict[str, JSONValue]] = []
     commit_active = False
+    commit: object | None = None
+
+    def drop_commit() -> None:
+        if commit is None:
+            board.drop_commit()
+        else:
+            board.drop_commit(commit)
+
+    def push_commit() -> None:
+        if commit is None:
+            board.push_commit()
+        else:
+            board.push_commit(commit, label)
+
     try:
-        board.begin_commit()
+        commit = board.begin_commit()
         commit_active = True
         for tool_name, arguments in operations:
             result = await invoke_backend_tool(args, tool_name, arguments)
             results.append(result)
             if not result["ok"]:
-                board.drop_commit()
+                drop_commit()
                 commit_active = False
                 return {
                     "schema_version": "1.0",
@@ -770,8 +784,16 @@ async def run_native_board_transaction(
         (artifacts / "edit.diff").write_text(diff_text, encoding="utf-8")
         staged_drc = board_drc_evidence(root, board_content=staged_content)
         new_findings = sorted(set(staged_drc["finding_keys"]) - set(before_drc["finding_keys"]))
-        if new_findings:
-            board.drop_commit()
+        before_summary = cast(dict[str, int], before_drc["summary"])
+        staged_summary = cast(dict[str, int], staged_drc["summary"])
+        placement_improved = (
+            label == "placement"
+            and staged_summary.get("violations", 0) < before_summary.get("violations", 0)
+            and staged_summary.get("unconnected_items", 0)
+            <= before_summary.get("unconnected_items", 0)
+        )
+        if new_findings and not placement_improved:
+            drop_commit()
             commit_active = False
             return {
                 "schema_version": "1.0",
@@ -785,7 +807,7 @@ async def run_native_board_transaction(
                 "artifacts": str(artifacts),
                 "diff": str(artifacts / "edit.diff"),
             }
-        board.push_commit()
+        push_commit()
         commit_active = False
         try:
             board.save()
@@ -802,6 +824,10 @@ async def run_native_board_transaction(
             "operations": results,
             "before_drc": before_drc,
             "staged_drc": staged_drc,
+            "accepted_placement_improvement": placement_improved,
+            "new_drc_findings_after_improvement": (
+                [json.loads(item) for item in new_findings] if placement_improved else []
+            ),
             "authority": final_authority,
             "artifacts": str(artifacts),
             "diff": str(artifacts / "edit.diff"),
@@ -810,7 +836,7 @@ async def run_native_board_transaction(
     except Exception:
         if commit_active:
             with contextlib.suppress(Exception):
-                board.drop_commit()
+                drop_commit()
         raise
 
 
@@ -1524,7 +1550,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                                 "reference": placement["reference"],
                                 "x_mm": x_mm,
                                 "y_mm": y_mm,
-                                "rotation_deg": 0.0,
+                                "rotation_deg": placement["rotation"],
                             },
                         )
                     )

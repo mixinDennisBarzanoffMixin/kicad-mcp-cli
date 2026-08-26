@@ -52,14 +52,16 @@ def _parse_root_at(block: str) -> tuple[float, float, int] | None:
 def _iter_blocks(content: str, keyword: str) -> Iterable[str]:
     cursor = 0
     marker = f"({keyword}"
-    while cursor < len(content):
-        if content[cursor:].startswith(marker):
-            block, length = _extract_block(content, cursor)
-            if block:
-                yield block
-                cursor += length
-                continue
-        cursor += 1
+    while True:
+        start = content.find(marker, cursor)
+        if start < 0:
+            return
+        block, length = _extract_block(content, start)
+        if block:
+            yield block
+            cursor = start + length
+        else:
+            cursor = start + len(marker)
 
 
 def _bbox_from_block(block: str) -> tuple[float, float]:

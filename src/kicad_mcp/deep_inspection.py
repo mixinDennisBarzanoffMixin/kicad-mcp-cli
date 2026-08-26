@@ -33,6 +33,7 @@ from .utils.placement import (
     PlacementComponent,
     PlacementNet,
     force_directed_placement,
+    legalize_placement,
 )
 
 type JsonRecord = dict[str, Any]
@@ -561,6 +562,11 @@ def connectivity_proof(
     missing_footprints = sorted(
         item["reference"] for item in components if not item.get("footprint")
     )
+    def comparable_net_name(name: object) -> str:
+        # KiCad serializes '/' inside auto-generated unconnected net names as
+        # the literal token ``{slash}`` when a pin function contains a slash.
+        return str(name).replace("{slash}", "/")
+
     board_mismatches = [
         {
             "reference": row["reference"],
@@ -569,7 +575,8 @@ def connectivity_proof(
             "board_net": row["board_pad_net"],
         }
         for row in rows
-        if row["board_pad_net"] and row["board_pad_net"] != row["net"]
+        if row["board_pad_net"]
+        and comparable_net_name(row["board_pad_net"]) != comparable_net_name(row["net"])
     ]
     requested_net_not_found = []
     if net and (not matched_requested_nets or not rows):
@@ -1335,7 +1342,22 @@ def placement_plan(
         ),
         stats=stats,
     )
+    proposed = legalize_placement(
+        proposed,
+        ForceDirectedConfig(
+            board_w=width,
+            board_h=height,
+            seed=seed,
+            grid_mm=grid_mm,
+            keepout_regions=local_keepouts,
+        ),
+        stats=stats,
+    )
     original = {component.ref: component for component in components}
+    rotation_by_ref = {
+        str(item["reference"]): float(item.get("rotation", 0.0) or 0.0)
+        for item in footprints
+    }
     placements = [
         {
             "reference": component.ref,
@@ -1345,6 +1367,7 @@ def placement_plan(
             ],
             "to": [round(component.x + left, 4), round(component.y + top, 4)],
             "fixed": component.fixed,
+            "rotation": rotation_by_ref.get(component.ref, 0.0),
         }
         for component in proposed
     ]
@@ -1358,6 +1381,8 @@ def placement_plan(
         "iterations_run": stats.get("iterations_run"),
         "converged": stats.get("converged"),
         "nets_considered": len(nets),
+        "legalized_moved": stats.get("legalized_moved"),
+        "legalized_unresolved": stats.get("legalized_unresolved"),
         "placements": placements,
         "notes": [
             "Connectivity-aware proposal only; connector, RF, thermal, and mechanical "

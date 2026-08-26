@@ -70,6 +70,28 @@ async def test_quality_gate_returns_verdict_report(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.anyio
+async def test_warning_gate_returns_warning_verdict_and_finding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "kicad_mcp.tools.validation._evaluate_schematic_gate",
+        lambda: GateOutcome(
+            name="Schematic",
+            status="WARN",
+            summary="ERC reported advisory warnings.",
+            details=["ERC warnings: 2"],
+        ),
+    )
+    server = build_server("full")
+
+    payload = await call_tool_payload(server, "schematic_quality_gate", {})
+
+    assert isinstance(payload, dict)
+    assert payload["verdict"] == "WARN"
+    assert payload["findings"][0]["severity"] == "warning"
+
+
+@pytest.mark.anyio
 async def test_project_next_action_includes_verdict_and_finding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

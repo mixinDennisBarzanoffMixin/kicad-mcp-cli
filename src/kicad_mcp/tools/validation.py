@@ -356,7 +356,11 @@ def _fix_for_gate(gate_name: str) -> SuggestedFix | None:
 
 def _finding_for_gate_detail(outcome: GateOutcome, detail: str) -> Finding:
     cleaned = detail.strip()
-    severity = "warning" if outcome.status == "EMPTY" or cleaned.startswith("WARN: ") else "error"
+    severity = (
+        "warning"
+        if outcome.status in {"EMPTY", "WARN"} or cleaned.startswith("WARN: ")
+        else "error"
+    )
     description = (
         cleaned.removeprefix("FAIL: ").removeprefix("WARN: ").removeprefix("BLOCKED: ").strip()
         or outcome.summary
@@ -931,8 +935,18 @@ def _evaluate_schematic_gate() -> GateOutcome:
         ignored_empty_sheets = _empty_child_sheet_ids(cfg.sch_file)
     raw_violations = _erc_violations(report)
     violations = _erc_violations(report, ignored_empty_sheets)
+    errors = [
+        violation
+        for violation in violations
+        if str(violation.get("severity", "error")).casefold() == "error"
+    ]
+    warnings = [violation for violation in violations if violation not in errors]
     ignored_violation_count = len(raw_violations) - len(violations)
-    details = [f"ERC violations: {len(violations)}"]
+    details = [
+        f"ERC violations: {len(violations)}",
+        f"ERC errors: {len(errors)}",
+        f"ERC warnings: {len(warnings)}",
+    ]
     if ignored_violation_count:
         details.append(f"Ignored empty child-sheet ERC violations: {ignored_violation_count}")
     if cfg.sch_file is not None:
@@ -958,13 +972,19 @@ def _evaluate_schematic_gate() -> GateOutcome:
         except (OSError, ValueError) as exc:
             details.append(f"Connectivity summary unavailable ({exc})")
 
-    status: GateStatus = "PASS" if not violations else "FAIL"
+    status: GateStatus = "FAIL" if errors else "WARN" if warnings else "PASS"
     if violations:
         details.append(f"Violation types: {_type_breakdown(violations)}")
     return GateOutcome(
         name="Schematic",
         status=status,
-        summary="ERC is clean." if status == "PASS" else "ERC reported blocking issues.",
+        summary=(
+            "ERC is clean."
+            if status == "PASS"
+            else "ERC reported advisory warnings."
+            if status == "WARN"
+            else "ERC reported blocking errors."
+        ),
         details=details,
     )
 
@@ -1303,15 +1323,19 @@ def _evaluate_schematic_connectivity_gate() -> GateOutcome:
                 )
             if component_contract is None:
                 continue
-            group_names_upper = {
-                str(name).upper()
+            group_names = {
+                str(name)
                 for group in relevant_groups
                 for name in cast(list[str], group["names"])
             }
             missing_groups = [
                 "/".join(options)
                 for options in component_contract.required_net_groups
-                if not any(option.upper() in group_names_upper for option in options)
+                if not any(
+                    _contract_net_option_matches(name, option)
+                    for option in options
+                    for name in group_names
+                )
             ]
             if missing_groups:
                 contract_violations += 1
@@ -1367,6 +1391,22 @@ def _evaluate_schematic_connectivity_gate() -> GateOutcome:
         summary="Connectivity structure looks consistent across the active schematic set.",
         details=details,
     )
+
+
+def _contract_net_option_matches(net_name: str, option: str) -> bool:
+    """Match a contract rail against exact or hierarchical/tokenized net names.
+
+    A project may legitimately call a rail ``/Sheet/ESP_3V3`` or
+    ``/Sheet/VBUS_USB``.  Matching whole alphanumeric tokens accepts those
+    scoped names without degrading to unsafe arbitrary substring matching.
+    """
+    leaf_name = net_name.rsplit("/", 1)[-1].upper()
+    expected = option.upper()
+    if leaf_name == expected:
+        return True
+    expected_token = re.sub(r"[^A-Z0-9]+", "", expected)
+    tokens = [token for token in re.split(r"[^A-Z0-9]+", leaf_name) if token]
+    return bool(expected_token and expected_token in tokens)
 
 
 def _evaluate_schematic_design_rule_gate() -> GateOutcome:
@@ -1437,7 +1477,7 @@ def _evaluate_schematic_design_rule_gate() -> GateOutcome:
 def _evaluate_pre_sync_gate() -> GateOutcome:
     """Validate that schematic state is safe to transfer into PCB footprints."""
     outcomes = [_evaluate_schematic_gate(), _evaluate_schematic_connectivity_gate()]
-    blocking = [outcome for outcome in outcomes if outcome.status != "PASS"]
+    blocking = [outcome for outcome in outcomes if outcome.status in {"FAIL", "BLOCKED"}]
     if blocking:
         details: list[str] = []
         for outcome in blocking:
@@ -1457,7 +1497,10 @@ def _evaluate_pre_sync_gate() -> GateOutcome:
         name="Pre-sync",
         status="PASS",
         summary="Schematic is ready for PCB sync.",
-        details=["ERC/connectivity blockers: 0"],
+        details=[
+            "ERC/connectivity blockers: 0",
+            f"Advisory upstream gates: {sum(outcome.status == 'WARN' for outcome in outcomes)}",
+        ],
     )
 
 

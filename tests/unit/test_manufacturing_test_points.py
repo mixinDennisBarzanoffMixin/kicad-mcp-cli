@@ -54,6 +54,10 @@ def test_collect_board_nets_file_fallback(tmp_path: Path, monkeypatch) -> None:
         encoding="utf-8",
     )
     monkeypatch.setattr("kicad_mcp.tools.test_points._get_pcb_file", lambda: pcb_file)
+    monkeypatch.setattr(
+        "kicad_mcp.tools.test_points.get_board",
+        lambda: (_ for _ in ()).throw(OSError("no live board in file-fallback test")),
+    )
     nets = _collect_board_nets()
     names = {n["name"] for n in nets}
     assert "GND" in names

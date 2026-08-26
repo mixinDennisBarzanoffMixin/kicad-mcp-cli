@@ -57,6 +57,12 @@ def test_board_file_helpers_parse_geometry_nets_and_frame() -> None:
     assert not board_file._placement_boxes_overlap(0, 0, 2, 2, 5, 0, 2, 2, 0.0)
 
 
+def test_board_block_iterator_handles_large_sparse_content() -> None:
+    content = "(kicad_pcb\n" + (" " * 1_000_000) + "(via (at 1 2))\n)"
+
+    assert list(board_file._iter_blocks(content, "via")) == ["(via (at 1 2))"]
+
+
 def test_export_support_retries_transient_cli_errors(
     sample_project: Path,
     monkeypatch: pytest.MonkeyPatch,

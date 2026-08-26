@@ -4877,9 +4877,22 @@ def _parse_no_connect_block(block: str) -> dict[str, Any] | None:
 def _build_connectivity_groups(sch_file: Path) -> list[dict[str, Any]]:
     data = parse_schematic_file(sch_file)
     try:
-        no_connect_points = _extract_no_connects(sch_file.read_text(encoding="utf-8"))
+        schematic_content = sch_file.read_text(encoding="utf-8")
+        no_connect_points = _extract_no_connects(schematic_content)
     except OSError:
+        schematic_content = ""
         no_connect_points = set()
+    # Resolve pins from the sheet's cached lib_symbols first.  KiCad instances
+    # remain electrically attached to that cached geometry until the cache is
+    # refreshed; consulting only the currently installed library can therefore
+    # invent orphan pins after a library update.
+    cached_libraries: dict[str, str] = {}
+    cached_placements: dict[str, list[Any]] = {}
+    if schematic_content:
+        from ..schematic_railway_rewire import _library_entries, _placed_symbols
+
+        cached_libraries = _library_entries(schematic_content)
+        cached_placements = _placed_symbols(schematic_content)
     parent: dict[tuple[float, float], tuple[float, float]] = {}
 
     def find(point: tuple[float, float]) -> tuple[float, float]:
@@ -4956,6 +4969,30 @@ def _build_connectivity_groups(sch_file: Path) -> list[dict[str, Any]]:
             int(symbol["unit"]),
         )
         pin_meta = get_pin_metadata(library, symbol_name, int(symbol["unit"]))
+        cached_positions: dict[str, tuple[float, float]] = {}
+        cached_entry = cached_libraries.get(str(symbol["lib_id"]))
+        if cached_entry is not None:
+            from ..schematic_railway_rewire import _definitions_for_unit, _transform_point
+
+            matching_placements = [
+                item
+                for item in cached_placements.get(str(symbol["reference"]).casefold(), [])
+                if item.lib_id == str(symbol["lib_id"])
+                and item.unit == int(symbol["unit"])
+                and abs(item.x - float(symbol["x"])) <= SNAP_TOLERANCE_MM
+                and abs(item.y - float(symbol["y"])) <= SNAP_TOLERANCE_MM
+            ]
+            if len(matching_placements) == 1:
+                placement = matching_placements[0]
+                cached_positions = {
+                    pin_number: _transform_point((definition.x, definition.y), placement)
+                    for pin_number, definition in _definitions_for_unit(
+                        cached_entry, int(symbol["unit"])
+                    ).items()
+                    if definition is not None
+                }
+        if cached_positions:
+            pin_positions = cached_positions
         for pin_number, point in pin_positions.items():
             group = ensure_group(point)
             group["points"].add(_point_key(*point))

@@ -357,6 +357,95 @@ def force_directed_placement(
     return comps
 
 
+def legalize_placement(
+    components: list[PlacementComponent],
+    cfg: ForceDirectedConfig,
+    *,
+    stats: dict[str, object] | None = None,
+) -> list[PlacementComponent]:
+    """Move overlapping parts to the nearest deterministic free grid point."""
+    resolved = [PlacementComponent(**component.__dict__) for component in components]
+    by_ref = {component.ref: component for component in resolved}
+    ordered = sorted(
+        resolved,
+        key=lambda component: (
+            not component.fixed,
+            -(component.w * component.h),
+            component.ref,
+        ),
+    )
+    placed: list[PlacementComponent] = []
+    moved = 0
+    unresolved: list[str] = []
+    step = max(cfg.grid_mm, 0.25)
+
+    def available(component: PlacementComponent, x: float, y: float) -> bool:
+        if not _inside_board(x, y, component, cfg) or _hits_keepout(x, y, component, cfg):
+            return False
+        left, top, right, bottom = _component_bounds(x, y, component)
+        for other in placed:
+            other_left, other_top, other_right, other_bottom = _component_bounds(
+                other.x, other.y, other
+            )
+            if not (
+                right <= other_left
+                or left >= other_right
+                or bottom <= other_top
+                or top >= other_bottom
+            ):
+                return False
+        return True
+
+    def ring_candidates(x: float, y: float, ring: int) -> list[tuple[float, float]]:
+        candidates: list[tuple[float, float]] = []
+        for offset in range(-ring, ring + 1):
+            candidates.append((x + (offset * step), y - (ring * step)))
+            candidates.append((x + (offset * step), y + (ring * step)))
+        for offset in range(-ring + 1, ring):
+            candidates.append((x - (ring * step), y + (offset * step)))
+            candidates.append((x + (ring * step), y + (offset * step)))
+        if cfg.seed % 2:
+            candidates.reverse()
+        return candidates
+
+    max_rings = int(math.ceil(max(cfg.board_w, cfg.board_h) / step)) + 2
+    for component in ordered:
+        original = (component.x, component.y)
+        candidate_x = _snap(component.x, cfg.grid_mm)
+        candidate_y = _snap(component.y, cfg.grid_mm)
+        if component.fixed:
+            if not available(component, candidate_x, candidate_y):
+                unresolved.append(component.ref)
+            component.x, component.y = candidate_x, candidate_y
+            placed.append(component)
+            continue
+        if not available(component, candidate_x, candidate_y):
+            found: tuple[float, float] | None = None
+            for ring in range(1, max_rings + 1):
+                for raw_x, raw_y in ring_candidates(candidate_x, candidate_y, ring):
+                    x = _snap(raw_x, cfg.grid_mm)
+                    y = _snap(raw_y, cfg.grid_mm)
+                    if available(component, x, y):
+                        found = (x, y)
+                        break
+                if found is not None:
+                    break
+            if found is None:
+                unresolved.append(component.ref)
+            else:
+                component.x, component.y = found
+        else:
+            component.x, component.y = candidate_x, candidate_y
+        if (component.x, component.y) != original:
+            moved += 1
+        placed.append(component)
+
+    if stats is not None:
+        stats["legalized_moved"] = moved
+        stats["legalized_unresolved"] = sorted(unresolved)
+    return [by_ref[component.ref] for component in components]
+
+
 # ---------------------------------------------------------------------------
 # BGA fanout geometry helpers
 # ---------------------------------------------------------------------------

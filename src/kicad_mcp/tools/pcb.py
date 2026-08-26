@@ -97,6 +97,7 @@ from ..utils.placement import (
     PlacementNet,
     force_directed_placement,
     generate_bga_fanout_plan,
+    legalize_placement,
 )
 from ..utils.sexpr import _extract_block, _sexpr_string
 from ..utils.units import _coord_nm, mm_to_nm, nm_to_mm
@@ -1281,14 +1282,16 @@ def _parse_root_at(block: str) -> tuple[float, float, int] | None:
 def _iter_blocks(content: str, keyword: str) -> Iterable[str]:
     cursor = 0
     marker = f"({keyword}"
-    while cursor < len(content):
-        if content[cursor:].startswith(marker):
-            block, length = _extract_block(content, cursor)
-            if block:
-                yield block
-                cursor += length
-                continue
-        cursor += 1
+    while True:
+        start = content.find(marker, cursor)
+        if start < 0:
+            return
+        block, length = _extract_block(content, start)
+        if block:
+            yield block
+            cursor = start + length
+        else:
+            cursor = start + len(marker)
 
 
 def _bbox_from_block(block: str) -> tuple[float, float]:
@@ -1713,8 +1716,8 @@ def _auto_place_force_directed_board_file(
     components = [
         PlacementComponent(
             ref=reference,
-            x=float(entry["x_mm"]),
-            y=float(entry["y_mm"]),
+            x=float(entry["x_mm"]) - x_min,
+            y=float(entry["y_mm"]) - y_min,
             w=float(entry["width_mm"]),
             h=float(entry["height_mm"]),
             fixed=False,
@@ -1741,13 +1744,23 @@ def _auto_place_force_directed_board_file(
         ),
         stats=stats,
     )
+    result = legalize_placement(
+        result,
+        ForceDirectedConfig(
+            board_w=max(1.0, x_max - x_min),
+            board_h=max(1.0, y_max - y_min),
+            seed=42,
+            grid_mm=grid_mm,
+        ),
+        stats=stats,
+    )
     replacements: dict[str, str] = {}
     for placed in result:
         entry = footprints[placed.ref]
         replacements[placed.ref] = _replace_root_at(
             str(entry["block"]),
-            x_mm=placed.x,
-            y_mm=placed.y,
+            x_mm=placed.x + x_min,
+            y_mm=placed.y + y_min,
             rotation=int(entry["rotation"]),
         )
     _transactional_board_write(lambda current: _replace_board_blocks(current, replacements, []))
@@ -1767,6 +1780,8 @@ def _auto_place_force_directed_board_file(
     return (
         "Force-directed auto-placement completed after PCB sync: "
         f"{len(replacements)} footprint(s), {len(nets)} weighted net(s); {convergence}."
+        f" Legalization moved {stats.get('legalized_moved', 0)} footprint(s); "
+        f"unresolved: {len(cast(list[str], stats.get('legalized_unresolved', [])))}."
         + score_lines
     )
 

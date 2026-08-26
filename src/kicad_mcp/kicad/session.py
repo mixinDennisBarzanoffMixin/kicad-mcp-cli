@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -166,7 +167,11 @@ class KiCadSession:
         if "kicad_token" in available and cfg.kicad_token is not None:
             kwargs["kicad_token"] = cfg.kicad_token
         if "client_name" in available:
-            kwargs["client_name"] = "kicad-mcp"
+            # KiCad keys active transaction state by client name.  A crashed
+            # short-lived CLI process can otherwise poison every later process
+            # with "commit already in progress".  A process-scoped identity
+            # keeps one MCP server stable while making CLI crash recovery safe.
+            kwargs["client_name"] = f"kicad-mcp-{os.getpid()}"
         if "timeout_ms" in available:
             kwargs["timeout_ms"] = int(cfg.ipc_connection_timeout * 1000)
         return kwargs

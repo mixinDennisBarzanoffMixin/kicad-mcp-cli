@@ -193,17 +193,22 @@ async def test_native_board_transaction_drops_commit_on_new_drc_finding(
 
     class FakeBoard:
         contents = iter(["before", "staged"])
+        commit = object()
 
         def get_as_string(self) -> str:
             return next(self.contents)
 
-        def begin_commit(self) -> None:
+        def begin_commit(self) -> object:
             effects.append("begin")
+            return self.commit
 
-        def drop_commit(self) -> None:
+        def drop_commit(self, commit: object) -> None:
+            assert commit is self.commit
             effects.append("drop")
 
-        def push_commit(self) -> None:
+        def push_commit(self, commit: object, message: str) -> None:
+            assert commit is self.commit
+            assert message == "placement"
             effects.append("push")
 
         def save(self) -> None:
@@ -250,6 +255,82 @@ async def test_native_board_transaction_drops_commit_on_new_drc_finding(
     assert report["status"] == "rejected"
     assert report["committed"] is False
     assert effects == ["begin", "drop"]
+
+
+async def test_native_placement_transaction_accepts_strict_drc_improvement(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import kicad_mcp.shell_cli as shell_cli
+
+    effects: list[str] = []
+    commit = object()
+
+    class FakeBoard:
+        contents = iter(["before", "staged"])
+
+        def get_as_string(self) -> str:
+            return next(self.contents)
+
+        def begin_commit(self) -> object:
+            effects.append("begin")
+            return commit
+
+        def drop_commit(self, active: object) -> None:
+            assert active is commit
+            effects.append("drop")
+
+        def push_commit(self, active: object, message: str) -> None:
+            assert active is commit
+            assert message == "placement"
+            effects.append("push")
+
+        def save(self) -> None:
+            effects.append("save")
+
+    monkeypatch.setattr(
+        shell_cli,
+        "authority_report",
+        lambda _root: {"policy": {"board_mutation_allowed": True}},
+    )
+    monkeypatch.setattr(shell_cli, "get_board", FakeBoard)
+
+    async def invoke(_args, _tool, _arguments):
+        return {"ok": True, "tool": "pcb_move_footprint"}
+
+    monkeypatch.setattr(shell_cli, "invoke_backend_tool", invoke)
+    drc_results = iter(
+        [
+            {
+                "finding_keys": ['{"kind":"old-a"}', '{"kind":"old-b"}'],
+                "summary": {"violations": 2, "unconnected_items": 1},
+            },
+            {
+                "finding_keys": ['{"kind":"new-a"}'],
+                "summary": {"violations": 1, "unconnected_items": 1},
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        shell_cli,
+        "board_drc_evidence",
+        lambda _root, board_content: next(drc_results),
+    )
+    args = argparse.Namespace(
+        project_dir=str(tmp_path),
+        artifacts=str(tmp_path / "evidence"),
+        profile="full",
+        mode="write",
+    )
+
+    report = await run_native_board_transaction(
+        args,
+        [("pcb_move_footprint", {"reference": "U1", "x_mm": 1, "y_mm": 2})],
+        label="placement",
+    )
+
+    assert report["status"] == "pass"
+    assert report["accepted_placement_improvement"] is True
+    assert effects == ["begin", "push", "save"]
 
 
 def test_result_envelope_preserves_structured_and_text_content() -> None:
@@ -367,6 +448,31 @@ def test_connectivity_proof_does_not_leak_findings_from_filtered_components() ->
     assert proof["findings"]["singleton_nets"] == []
 
 
+def test_connectivity_proof_accepts_kicad_slash_token_in_unconnected_net() -> None:
+    snapshot = _snapshot()
+    snapshot["schematic"]["nets"] = [
+        {
+            "name": "unconnected-(U1-A/B-Pad1)",
+            "unconnected": True,
+            "nodes": [
+                {
+                    "reference": "U1",
+                    "pin": "1",
+                    "function": "A/B",
+                    "type": "bidirectional+no_connect",
+                }
+            ],
+        }
+    ]
+    snapshot["board"]["footprints"][0]["pads"][0]["net"] = (
+        "unconnected-(U1-A{slash}B-Pad1)"
+    )
+
+    proof = connectivity_proof(snapshot, reference="U1")
+
+    assert proof["findings"]["board_net_mismatches"] == []
+
+
 def test_source_integrity_evidence_is_sheet_scoped(tmp_path: Path) -> None:
     top = tmp_path / "demo.kicad_pro"
     top.write_text("{}", encoding="utf-8")
@@ -435,13 +541,16 @@ def test_route_plan_uses_astar_around_footprint_obstacle() -> None:
 
 
 def test_placement_plan_is_deterministic_and_holds_fixed_references() -> None:
-    first = placement_plan(_snapshot(), fixed_references=["U1"], iterations=20)
-    second = placement_plan(_snapshot(), fixed_references=["U1"], iterations=20)
+    snapshot = _snapshot()
+    snapshot["board"]["footprints"][0]["rotation"] = 90
+    first = placement_plan(snapshot, fixed_references=["U1"], iterations=20)
+    second = placement_plan(snapshot, fixed_references=["U1"], iterations=20)
 
     assert first == second
     u1 = next(item for item in first["placements"] if item["reference"] == "U1")
     assert u1["fixed"] is True
     assert u1["from"] == u1["to"]
+    assert u1["rotation"] == 90.0
 
 
 def test_shell_source_does_not_use_shell_execution() -> None:
