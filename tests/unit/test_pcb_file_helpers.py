@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import pytest
 
-from kicad_mcp.models.pcb import AutoPlaceBySchematicInput, StackupLayerSpec
+from kicad_mcp.models.pcb import (
+    AutoPlaceBySchematicInput,
+    StackupLayerSpec,
+    SyncPcbFromSchematicInput,
+)
 from kicad_mcp.tools.pcb import (
     _append_to_footprint_block,
     _apply_stackup_to_board,
     _copper_layer_order,
+    _find_open_position,
     _impedance_context_for_layer,
     _inner_layer_graphic_block,
     _parse_netlist_text,
@@ -14,6 +19,36 @@ from kicad_mcp.tools.pcb import (
     _replace_or_append_child_block,
     _strategy_board_positions,
 )
+
+
+def test_sync_placement_moves_an_outside_seed_inside_edge_cuts() -> None:
+    x_mm, y_mm = _find_open_position(
+        62.95,
+        14.2,
+        23.78,
+        7.6,
+        SyncPcbFromSchematicInput(grid_mm=0.5),
+        [],
+        (20.0, 20.0, 170.0, 120.0),
+    )
+
+    assert x_mm - (23.78 / 2) >= 21.0
+    assert x_mm + (23.78 / 2) <= 169.0
+    assert y_mm - (7.6 / 2) >= 21.0
+    assert y_mm + (7.6 / 2) <= 119.0
+
+
+def test_sync_placement_fails_when_footprint_cannot_fit_inside_edge_cuts() -> None:
+    with pytest.raises(RuntimeError, match="inside Edge.Cuts"):
+        _find_open_position(
+            5.0,
+            5.0,
+            20.0,
+            20.0,
+            SyncPcbFromSchematicInput(grid_mm=0.5),
+            [],
+            (0.0, 0.0, 10.0, 10.0),
+        )
 
 
 def _four_layer_stackup() -> list[StackupLayerSpec]:

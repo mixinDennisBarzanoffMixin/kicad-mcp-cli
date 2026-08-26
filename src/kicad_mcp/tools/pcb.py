@@ -2238,10 +2238,20 @@ def _find_open_position(
     height_mm: float,
     payload: SyncPcbFromSchematicInput,
     occupied: list[dict[str, float]],
+    board_bounds: tuple[float, float, float, float] | None = None,
 ) -> tuple[float, float]:
     margin_mm = PLACEMENT_MARGIN_MM
 
     def is_free(candidate_x_mm: float, candidate_y_mm: float) -> bool:
+        if board_bounds is not None:
+            min_x_mm, min_y_mm, max_x_mm, max_y_mm = board_bounds
+            if not (
+                candidate_x_mm - (width_mm / 2) >= min_x_mm + margin_mm
+                and candidate_x_mm + (width_mm / 2) <= max_x_mm - margin_mm
+                and candidate_y_mm - (height_mm / 2) >= min_y_mm + margin_mm
+                and candidate_y_mm + (height_mm / 2) <= max_y_mm - margin_mm
+            ):
+                return False
         return not any(
             _placement_boxes_overlap(
                 candidate_x_mm,
@@ -2291,6 +2301,11 @@ def _find_open_position(
             if is_free(candidate_x_mm, candidate_y_mm):
                 return candidate_x_mm, candidate_y_mm
 
+    if board_bounds is not None:
+        raise RuntimeError(
+            "Could not find a collision-free footprint position inside Edge.Cuts "
+            f"for a {width_mm:.2f} x {height_mm:.2f} mm footprint."
+        )
     return snapped_seed
 
 
@@ -2426,6 +2441,7 @@ def _planned_board_positions(
     components: list[dict[str, Any]],
     payload: SyncPcbFromSchematicInput,
     occupied_boxes: list[dict[str, float]] | None = None,
+    board_bounds: tuple[float, float, float, float] | None = None,
 ) -> dict[str, tuple[float, float]]:
     if not components:
         return {}
@@ -2447,6 +2463,7 @@ def _planned_board_positions(
             height_mm,
             payload,
             occupied,
+            board_bounds,
         )
         positions[str(component["reference"])] = (resolved_x_mm, resolved_y_mm)
         occupied.append(
@@ -3520,7 +3537,12 @@ def _register_schematic_sync_tools(mcp: FastMCP) -> None:
             for component in sync_components
             if str(component["reference"]) not in existing
         ]
-        placements = _planned_board_positions(components_to_add, payload, occupied_boxes)
+        placements = _planned_board_positions(
+            components_to_add,
+            payload,
+            occupied_boxes,
+            _edge_cuts_bounds(board_content),
+        )
 
         for component in components_to_add:
             reference = str(component["reference"])

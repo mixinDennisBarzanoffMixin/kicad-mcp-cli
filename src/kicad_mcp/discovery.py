@@ -347,14 +347,30 @@ def scan_project_dir(directory: Path) -> dict[str, Path | None]:
     if not directory.exists() or not directory.is_dir():
         return result
 
-    for extension, key in (
-        (".kicad_pro", "project"),
-        (".kicad_pcb", "pcb"),
-        (".kicad_sch", "schematic"),
-    ):
+    project_matches = sorted(directory.glob("*.kicad_pro"))
+    if project_matches:
+        result["project"] = select_canonical_kicad_file(
+            directory, project_matches, ".kicad_pro"
+        )
+
+    project = result["project"]
+    for extension, key in ((".kicad_pcb", "pcb"), (".kicad_sch", "schematic")):
         matches = sorted(directory.glob(f"*{extension}"))
-        if matches:
-            result[key] = select_canonical_kicad_file(directory, matches, extension)
+        if not matches:
+            continue
+        # A hierarchical project legitimately contains many .kicad_sch files.
+        # Its root schematic and board share the .kicad_pro basename even when
+        # the containing directory has a different name (temporary candidates,
+        # CI worktrees, renamed checkout folders).  Bind companions to the
+        # selected project before falling back to directory-name heuristics.
+        matching_companion = (
+            project.with_suffix(extension)
+            if project is not None and project.with_suffix(extension) in matches
+            else None
+        )
+        result[key] = matching_companion or select_canonical_kicad_file(
+            directory, matches, extension
+        )
     return result
 
 

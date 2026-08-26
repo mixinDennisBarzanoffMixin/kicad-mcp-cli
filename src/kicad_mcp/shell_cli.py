@@ -1893,6 +1893,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="hold one mechanical anchor reference fixed; repeatable",
     )
     place.add_argument(
+        "--move-only",
+        dest="move_only_references",
+        action="append",
+        default=[],
+        help=(
+            "allow only this footprint root to move and freeze every other footprint; "
+            "repeatable"
+        ),
+    )
+    place.add_argument(
         "--anchor",
         dest="anchors",
         action="append",
@@ -1935,6 +1945,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--spec",
         default=".kicad-mcp/project_spec.json",
         help="optional project-relative intent JSON supplying decoupling proximity pairs",
+    )
+    place.add_argument(
+        "--board-candidate",
+        default="",
+        metavar="FILE",
+        help="plan against an offline .kicad_pcb candidate instead of the saved board",
     )
     place.add_argument("--apply", action="store_true")
     place.add_argument("--yes", action="store_true", help="confirm placement mutation")
@@ -2591,6 +2607,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 fixed_references = [
                     str(value) for value in floorplan.get("fixed_references", [])
                 ]
+            if args.move_only_references and args.fixed_references:
+                raise ValueError("--move-only and --fix cannot be combined")
             proximity_pairs: list[dict[str, Any]] = []
             if spec:
                 raw_pairs = spec.get("decoupling_pairs", [])
@@ -2613,8 +2631,36 @@ def main(argv: Sequence[str] | None = None) -> None:
                 args.grid_mm if args.grid_mm is not None else floorplan.get("grid_mm", 0.5)
             )
             seed = int(args.seed if args.seed is not None else floorplan.get("seed", 42))
+            candidate_path = (
+                Path(args.board_candidate).expanduser().resolve()
+                if args.board_candidate
+                else None
+            )
+            if candidate_path is not None and not candidate_path.is_file():
+                raise ValueError(f"board candidate does not exist: {candidate_path}")
+            snapshot = project_snapshot(
+                project_root,
+                board_content=(
+                    candidate_path.read_text(encoding="utf-8")
+                    if candidate_path is not None
+                    else None
+                ),
+                board_source=str(candidate_path) if candidate_path is not None else "",
+            )
+            if args.move_only_references:
+                movable = {str(reference) for reference in args.move_only_references}
+                board_references = {
+                    str(footprint.get("reference", ""))
+                    for footprint in snapshot.get("board", {}).get("footprints", [])
+                }
+                unknown = sorted(movable - board_references)
+                if unknown:
+                    raise ValueError(
+                        "--move-only contains unknown board references: " + ", ".join(unknown)
+                    )
+                fixed_references = sorted(board_references - movable)
             plan = placement_plan(
-                project_snapshot(project_root),
+                snapshot,
                 fixed_references=fixed_references,
                 anchors=anchors,
                 cluster_regions=clusters,
@@ -2677,9 +2723,23 @@ def main(argv: Sequence[str] | None = None) -> None:
                     if placements_to_apply
                     else []
                 )
-                transaction = asyncio.run(
-                    run_native_board_transaction(args, operations, label="placement")
-                )
+                if candidate_path is not None:
+                    artifacts = (
+                        Path(args.artifacts).expanduser().resolve()
+                        if args.artifacts
+                        else project_root / "build" / "kicadq-transactions" / "placement"
+                    )
+                    transaction = _run_offline_candidate_refinement(
+                        root=project_root,
+                        before_content=candidate_path.read_text(encoding="utf-8"),
+                        operations=operations,
+                        artifacts=artifacts,
+                        source=str(candidate_path),
+                    )
+                else:
+                    transaction = asyncio.run(
+                        run_native_board_transaction(args, operations, label="placement")
+                    )
                 plan["transaction"] = transaction
                 if transaction["status"] in {"rejected", "blocked"}:
                     plan["status"] = transaction["status"]

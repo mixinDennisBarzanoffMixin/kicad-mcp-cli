@@ -64,6 +64,8 @@ def _kicad_cli() -> str:
         configured,
         shutil.which("kicad-cli") or "",
         "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
+        "/Volumes/Apps/User Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
+        "/Volumes/KiCad/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
     ]
     for candidate in candidates:
         if candidate and Path(candidate).is_file():
@@ -150,6 +152,43 @@ def _schematic_snapshot(
     return sheets, components, nets
 
 
+def _net_identity(block: str) -> tuple[int, str]:
+    """Read either KiCad 9 numeric or KiCad 10 name-based net syntax."""
+    named = re.search(rf"\(net(?:\s+(\d+))?\s+{STRING_PATTERN}\)", block)
+    if named:
+        return int(named.group(1) or 0), named.group(2)
+    numeric = re.search(r"\(net\s+(\d+)\)", block)
+    return (int(numeric.group(1)), "") if numeric else (0, "")
+
+
+def _board_net_names(
+    content: str,
+    footprints: dict[str, JsonRecord] | None = None,
+) -> list[str]:
+    """Return semantic board nets across KiCad serialization versions."""
+    names = {
+        name
+        for _code, name in re.findall(
+            rf"\(net\s+(\d+)\s+{STRING_PATTERN}\)", content
+        )
+        if name
+    }
+    parsed = footprints if footprints is not None else _parse_board_footprint_blocks(content)
+    for footprint in parsed.values():
+        names.update(
+            name for name in dict(footprint.get("pad_nets", {})).values() if name
+        )
+    for kind in ("segment", "arc", "via", "zone"):
+        for block in _iter_blocks(content, kind):
+            _code, name = _net_identity(block)
+            if name:
+                names.add(name)
+            zone_name = re.search(rf"\(net_name\s+{STRING_PATTERN}\)", block)
+            if zone_name and zone_name.group(1):
+                names.add(zone_name.group(1))
+    return sorted(names)
+
+
 def _track_records(content: str) -> list[JsonRecord]:
     tracks: list[JsonRecord] = []
     for segment in _iter_blocks(content, "segment"):
@@ -157,8 +196,8 @@ def _track_records(content: str) -> list[JsonRecord]:
         end = re.search(rf"\(end\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})\)", segment)
         width = re.search(rf"\(width\s+({FLOAT_PATTERN})\)", segment)
         layer = re.search(r'\(layer\s+"([^"]+)"\)', segment)
-        net = re.search(r"\(net\s+(\d+)\)", segment)
-        if not (start and end and width and layer and net):
+        net_code, net_name = _net_identity(segment)
+        if not (start and end and width and layer and (net_code or net_name)):
             continue
         x1, y1, x2, y2 = map(float, (*start.groups(), *end.groups()))
         tracks.append(
@@ -167,7 +206,8 @@ def _track_records(content: str) -> list[JsonRecord]:
                 "end": [x2, y2],
                 "width_mm": float(width.group(1)),
                 "layer": layer.group(1),
-                "net_code": int(net.group(1)),
+                "net_code": net_code,
+                "net": net_name,
                 "length_mm": round(math.hypot(x2 - x1, y2 - y1), 4),
             }
         )
@@ -180,14 +220,15 @@ def _via_records(content: str) -> list[JsonRecord]:
         at = re.search(rf"\(at\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})\)", via)
         size = re.search(rf"\(size\s+({FLOAT_PATTERN})\)", via)
         drill = re.search(rf"\(drill\s+({FLOAT_PATTERN})\)", via)
-        net = re.search(r"\(net\s+(\d+)\)", via)
-        if at and size and drill and net:
+        net_code, net_name = _net_identity(via)
+        if at and size and drill and (net_code or net_name):
             vias.append(
                 {
                     "at": [float(at.group(1)), float(at.group(2))],
                     "diameter_mm": float(size.group(1)),
                     "drill_mm": float(drill.group(1)),
-                    "net_code": int(net.group(1)),
+                    "net_code": net_code,
+                    "net": net_name,
                 }
             )
     return vias
@@ -213,7 +254,10 @@ def _board_semantic_state(content: str) -> JsonRecord:
             }
         )
     tracks = [
-        {key: item[key] for key in ("start", "end", "width_mm", "layer", "net_code")}
+        {
+            key: item[key]
+            for key in ("start", "end", "width_mm", "layer", "net_code", "net")
+        }
         for item in _track_records(normalized)
     ]
     vias = _via_records(normalized)
@@ -231,10 +275,7 @@ def _board_semantic_state(content: str) -> JsonRecord:
                 "layers": " ".join(layers_match.group(1).split()) if layers_match else "",
             }
         )
-    nets = sorted(
-        (int(code), name)
-        for code, name in re.findall(rf"\(net\s+(\d+)\s+{STRING_PATTERN}\)", normalized)
-    )
+    nets = _board_net_names(normalized, footprints)
     return {
         "bounds_mm": list(bounds) if (bounds := _edge_cuts_bounds(normalized)) else None,
         "footprints": footprint_state,
@@ -316,7 +357,7 @@ def _pad_positions(footprint: JsonRecord) -> list[JsonRecord]:
             rf"\(at\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})(?:\s+{FLOAT_PATTERN})?\)", pad
         )
         size = re.search(rf"\(size\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})\)", pad)
-        net = re.search(rf"\(net(?:\s+(\d+))?\s+{STRING_PATTERN}\)", pad)
+        net_code, net_name = _net_identity(pad)
         if not (number and at and size):
             continue
         local_x = float(at.group(1)) * (-1 if back else 1)
@@ -330,8 +371,8 @@ def _pad_positions(footprint: JsonRecord) -> list[JsonRecord]:
                 "number": number.group(1),
                 "at": [round(global_x, 4), round(global_y, 4)],
                 "size": [float(size.group(1)), float(size.group(2))],
-                "net_code": int(net.group(1) or 0) if net else 0,
-                "net": net.group(2) if net else "",
+                "net_code": net_code,
+                "net": net_name,
             }
         )
     return pads
@@ -1279,9 +1320,12 @@ def project_snapshot(
         )
     }
     for track in tracks:
-        track["net"] = board_nets.get(int(track["net_code"]), "")
+        if not track.get("net"):
+            track["net"] = board_nets.get(int(track["net_code"]), "")
     for via in vias:
-        via["net"] = board_nets.get(int(via["net_code"]), "")
+        if not via.get("net"):
+            via["net"] = board_nets.get(int(via["net_code"]), "")
+    board_net_names = _board_net_names(normalized_board_content, parsed_footprints)
     bounds = _edge_cuts_bounds(normalized_board_content)
     copper_layers = re.findall(
         r'^\s*\(\d+ "(?:F|B|In\d+)\.Cu" ', normalized_board_content, re.MULTILINE
@@ -1318,7 +1362,7 @@ def project_snapshot(
                 "footprints": len(footprints),
                 "tracks": len(tracks),
                 "vias": len(vias),
-                "nets": len(board_nets),
+                "nets": len(board_net_names),
             },
         },
     }
@@ -2632,7 +2676,8 @@ def placement_plan(
     )
     unresolved = list(stats.get("legalized_unresolved", []))
     baseline_unresolved = list(baseline_stats.get("legalized_unresolved", []))
-    quality_pass = hpwl_delta_pct <= 25.0 and not unresolved and not baseline_unresolved
+    new_unresolved = sorted(set(unresolved) - set(baseline_unresolved))
+    quality_pass = hpwl_delta_pct <= 25.0 and not new_unresolved
     return {
         "status": "planned",
         "board_bounds_mm": list(bounds),
@@ -2655,6 +2700,7 @@ def placement_plan(
         "wirelength_delta_pct": round(hpwl_delta_pct, 2),
         "wirelength_vs_original_delta_pct": round(hpwl_original_delta_pct, 2),
         "baseline_legalized_unresolved": baseline_unresolved,
+        "new_legalized_unresolved": new_unresolved,
         "quality_gate": {
             "status": "pass" if quality_pass else "fail",
             "max_wirelength_increase_pct": 25.0,
@@ -2662,16 +2708,12 @@ def placement_plan(
                 "weighted HPWL is within the allowed regression threshold"
                 if quality_pass
                 else (
-                    "placement legalization left unresolved footprints: " + ", ".join(unresolved)
-                    if unresolved
+                    "placement legalization introduced unresolved footprints: "
+                    + ", ".join(new_unresolved)
+                    if new_unresolved
                     else (
-                        "legalized comparison baseline left unresolved footprints: "
-                        + ", ".join(baseline_unresolved)
-                        if baseline_unresolved
-                        else (
-                            "weighted HPWL would regress by more than 25% versus "
-                            "the legalized baseline"
-                        )
+                        "weighted HPWL would regress by more than 25% versus "
+                        "the legalized baseline"
                     )
                 )
             ),
