@@ -86,7 +86,13 @@ def test_drc_regression_ignores_item_order_and_unconnected_pair_churn() -> None:
         "type": "clearance",
         "items": [{"uuid": "b"}, {"uuid": "a"}],
     }
-    reordered = {**physical, "items": list(reversed(physical["items"]))}
+    reordered = {
+        **physical,
+        "items": [
+            {**child, "pos": {"x": 100.0, "y": 200.0}}
+            for child in reversed(physical["items"])
+        ],
+    }
     old_unconnected = {
         "kind": "unconnected",
         "type": "unconnected_items",
@@ -99,10 +105,12 @@ def test_drc_regression_ignores_item_order_and_unconnected_pair_churn() -> None:
     }
     before = {
         "finding_keys": [_drc_finding_key(physical), _drc_finding_key(old_unconnected)],
+        "findings": [physical, old_unconnected],
         "summary": {"violations": 1, "unconnected_items": 1},
     }
     staged = {
         "finding_keys": [_drc_finding_key(reordered), _drc_finding_key(new_unconnected)],
+        "findings": [reordered, new_unconnected],
         "summary": {"violations": 1, "unconnected_items": 1},
     }
 

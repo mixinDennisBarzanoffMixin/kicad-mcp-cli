@@ -196,7 +196,10 @@ kicadq -C ./board power-loops --format jsonl |
 host. It rotates pad geometry rigidly, preserves concave KiCad courtyard loops,
 checks keepouts and other component courtyards, and scores both the supply path
 and ground return. Existing capacitor orientation is preferred unless rotation
-materially improves the electrical result.
+materially improves the electrical result. Capacitors declared for the same host
+are packed with a bounded deterministic cluster search, so a locally attractive
+first capacitor cannot consume the only legal position for a later one. A failed
+search reports the blocking footprint references and hit counts.
 
 ```bash
 kicadq -C ./board place-power-loops --ref U1 | jq '.placements,.after.groups'
@@ -212,6 +215,9 @@ with the verified candidate, pushed, read back, verified again, and only then
 saved. A mismatch is reverted. If native IPC is unavailable, the verified
 candidate and diff are retained as evidence with `candidate_verified: true`, but
 the live/saved board is not modified and the command exits blocked (`4`).
+Candidate artifacts include `before-drc.json`, `staged-drc.json`, and
+`drc-regressions.json`; finding identity is based on stable KiCad UUID relations,
+not coordinates that legitimately change during a footprint move.
 
 Both planners are proposals, not substitutes for KiCad DRC or electrical,
 thermal, RF, and mechanical review.

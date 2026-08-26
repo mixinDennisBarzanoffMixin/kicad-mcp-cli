@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
+from collections import Counter
 from collections.abc import Iterable
 from heapq import heappop, heappush
 from pathlib import Path
@@ -867,6 +868,9 @@ def power_loop_placement_plan(
                 * float(footprints.get(cap_ref, {}).get("height_mm", 0.0))
             ),
         )
+        group_candidates: list[
+            tuple[str, list[tuple[float, JsonRecord, list[list[tuple[float, float]]]]]]
+        ] = []
         for cap_ref in ordered_cap_refs:
             member = member_by_ref.get(cap_ref)
             if member is not None and member.get("status") == "pass":
@@ -893,6 +897,8 @@ def power_loop_placement_plan(
             candidates: list[
                 tuple[float, JsonRecord, list[list[tuple[float, float]]]]
             ] = []
+            blocker_hits: Counter[str] = Counter()
+            in_bounds_transforms = 0
             for host_pad in matching_host_pads:
                 host_at = list(host_pad.get("at", []))
                 outward_x = float(host_at[0]) - float(host.get("x_mm") or 0.0)
@@ -942,6 +948,7 @@ def power_loop_placement_plan(
                                     or bounds[3] > board_bounds[3]
                                 ):
                                     continue
+                                in_bounds_transforms += 1
                                 candidate_polygons = _transform_courtyard_polygons(
                                     cap,
                                     root_x,
@@ -949,12 +956,17 @@ def power_loop_placement_plan(
                                     rotation_deg,
                                     margin_mm=courtyard_margin_mm,
                                 )
-                                if any(
-                                    _polygons_overlap(candidate_polygon, occupied_polygon)
-                                    for _occupied_ref, occupied_polygons in occupied
-                                    for candidate_polygon in candidate_polygons
-                                    for occupied_polygon in occupied_polygons
-                                ):
+                                blocking_refs = {
+                                    occupied_ref
+                                    for occupied_ref, occupied_polygons in occupied
+                                    if any(
+                                        _polygons_overlap(candidate_polygon, occupied_polygon)
+                                        for candidate_polygon in candidate_polygons
+                                        for occupied_polygon in occupied_polygons
+                                    )
+                                }
+                                if blocking_refs:
+                                    blocker_hits.update(blocking_refs)
                                     continue
                                 return_mm: float | None = None
                                 for cap_ground_pad in cap_ground_pads:
@@ -1033,20 +1045,107 @@ def power_loop_placement_plan(
                         "host_reference": host_ref,
                         "rail": rail,
                         "reason": "no in-bounds collision-free pad-aware candidate was found",
+                        "in_bounds_transforms_checked": in_bounds_transforms,
+                        "blocking_footprints": [
+                            {"reference": blocker, "hits": hits}
+                            for blocker, hits in blocker_hits.most_common(12)
+                        ],
                     }
                 )
                 continue
-            _score, selected, selected_polygons = min(
-                candidates,
+            # The same root transform may be reached from several host pads or
+            # angular samples. Keep its best electrical interpretation before
+            # group packing so the bounded search remains small and diverse.
+            by_transform: dict[
+                tuple[float, float, float],
+                tuple[float, JsonRecord, list[list[tuple[float, float]]]],
+            ] = {}
+            for candidate in candidates:
+                candidate_to = candidate[1]["to"]
+                transform = (
+                    float(candidate_to[0]),
+                    float(candidate_to[1]),
+                    float(candidate[1]["rotation"]),
+                )
+                current = by_transform.get(transform)
+                if current is None or candidate[0] < current[0]:
+                    by_transform[transform] = candidate
+            ranked_candidates = sorted(
+                by_transform.values(),
                 key=lambda item: (
                     item[0],
                     float(item[1]["to"][1]),
                     float(item[1]["to"][0]),
                     float(item[1]["rotation"]),
                 ),
+            )[:256]
+            group_candidates.append((cap_ref, ranked_candidates))
+
+        # Capacitors around one IC are a coupled placement problem. A greedy
+        # first choice can consume the only legal location for a second, larger
+        # capacitor. Keep a bounded beam of complete non-overlapping cluster
+        # arrangements so earlier choices can be reconsidered deterministically.
+        beam: list[
+            tuple[
+                float,
+                list[tuple[str, JsonRecord, list[list[tuple[float, float]]]]],
+                list[list[tuple[float, float]]],
+            ]
+        ] = [(0.0, [], [])]
+        packing_failed = False
+        for cap_ref, candidates in sorted(group_candidates, key=lambda item: len(item[1])):
+            next_beam: list[
+                tuple[
+                    float,
+                    list[tuple[str, JsonRecord, list[list[tuple[float, float]]]]],
+                    list[list[tuple[float, float]]],
+                ]
+            ] = []
+            for accumulated_score, selected_items, selected_polygons in beam:
+                for candidate_score, candidate, candidate_polygons in candidates:
+                    if any(
+                        _polygons_overlap(candidate_polygon, selected_polygon)
+                        for candidate_polygon in candidate_polygons
+                        for selected_polygon in selected_polygons
+                    ):
+                        continue
+                    next_beam.append(
+                        (
+                            accumulated_score + candidate_score,
+                            [*selected_items, (cap_ref, candidate, candidate_polygons)],
+                            [*selected_polygons, *candidate_polygons],
+                        )
+                    )
+            if not next_beam:
+                unresolved.append(
+                    {
+                        "reference": cap_ref,
+                        "host_reference": host_ref,
+                        "reason": "no collision-free complete capacitor-cluster packing was found",
+                    }
+                )
+                packing_failed = True
+                break
+            next_beam.sort(
+                key=lambda item: (
+                    item[0],
+                    tuple(
+                        (
+                            str(selected[1]["reference"]),
+                            float(selected[1]["to"][1]),
+                            float(selected[1]["to"][0]),
+                            float(selected[1]["rotation"]),
+                        )
+                        for selected in item[1]
+                    ),
+                )
             )
-            placements.append(selected)
-            occupied.append((cap_ref, selected_polygons))
+            beam = next_beam[:512]
+        if group_candidates and not packing_failed:
+            _score, selected_items, _selected_polygons = beam[0]
+            for cap_ref, selected, selected_polygons in selected_items:
+                placements.append(selected)
+                occupied.append((cap_ref, selected_polygons))
 
     proposed_snapshot = copy.deepcopy(snapshot)
     proposed_by_ref = {
@@ -1454,12 +1553,27 @@ def _erc_evidence(schematic: Path, *, sheet: str = "") -> JsonRecord:
 
 
 def _drc_finding_key(item: JsonRecord) -> str:
-    """Canonicalize a KiCad DRC finding independent of item reporting order."""
-    canonical = dict(item)
-    raw_items = canonical.get("items")
+    """Identify one DRC relation independent of order and moved coordinates."""
+    canonical = {
+        key: item.get(key)
+        for key in ("kind", "type", "severity")
+        if item.get(key) is not None
+    }
+    raw_items = item.get("items")
     if isinstance(raw_items, list):
+        children: list[JsonRecord] = []
+        for child in raw_items:
+            if not isinstance(child, dict):
+                continue
+            # UUIDs identify the actual pad, field, graphic, or footprint.
+            # Positions change during a legal root transform and must not turn
+            # an unchanged intrinsic footprint violation into a new finding.
+            if child.get("uuid"):
+                children.append({"uuid": str(child["uuid"])})
+            else:
+                children.append({"description": str(child.get("description", ""))})
         canonical["items"] = sorted(
-            raw_items,
+            children,
             key=lambda child: json.dumps(child, sort_keys=True, separators=(",", ":")),
         )
     return json.dumps(canonical, sort_keys=True, separators=(",", ":"))
@@ -2111,26 +2225,26 @@ def placement_plan(
     ) -> tuple[float, float, float, float]:
         min_x = float(
             item.get(
-                "body_bbox_min_x_mm",
-                item.get("bbox_min_x_mm", -float(item["width_mm"]) / 2.0),
+                "bbox_min_x_mm",
+                -float(item["width_mm"]) / 2.0,
             )
         )
         min_y = float(
             item.get(
-                "body_bbox_min_y_mm",
-                item.get("bbox_min_y_mm", -float(item["height_mm"]) / 2.0),
+                "bbox_min_y_mm",
+                -float(item["height_mm"]) / 2.0,
             )
         )
         max_x = float(
             item.get(
-                "body_bbox_max_x_mm",
-                item.get("bbox_max_x_mm", float(item["width_mm"]) / 2.0),
+                "bbox_max_x_mm",
+                float(item["width_mm"]) / 2.0,
             )
         )
         max_y = float(
             item.get(
-                "body_bbox_max_y_mm",
-                item.get("bbox_max_y_mm", float(item["height_mm"]) / 2.0),
+                "bbox_max_y_mm",
+                float(item["height_mm"]) / 2.0,
             )
         )
         angle = math.radians(rotation_deg)

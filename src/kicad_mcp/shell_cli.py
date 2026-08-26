@@ -34,6 +34,7 @@ from .circuit_spec_arrangement import arrange_circuit_spec, format_circuit_spec_
 from .config import reset_config
 from .connection import get_board
 from .deep_inspection import (
+    _drc_finding_key,
     _project_files,
     ascii_map,
     authority_report,
@@ -738,7 +739,14 @@ def _drc_regression_details(
     failures makes safe placement candidates impossible to verify.
     """
     new_keys = sorted(set(staged_drc["finding_keys"]) - set(before_drc["finding_keys"]))
-    new_findings = [json.loads(item) for item in new_keys]
+    staged_findings_by_key = {
+        _drc_finding_key(cast(dict[str, Any], finding)): finding
+        for finding in staged_drc.get("findings", [])
+        if isinstance(finding, dict)
+    }
+    new_findings = [
+        cast(dict[str, Any], staged_findings_by_key.get(key, json.loads(key))) for key in new_keys
+    ]
     new_physical = [
         finding
         for finding in new_findings
@@ -756,6 +764,24 @@ def _drc_regression_details(
         "unconnected_increase": max(0, staged_unconnected - before_unconnected),
         "regressed": bool(new_physical or staged_unconnected > before_unconnected),
     }
+
+
+def _write_drc_evidence_artifacts(
+    artifacts: Path,
+    before_drc: dict[str, Any],
+    staged_drc: dict[str, Any],
+    regressions: dict[str, Any],
+) -> None:
+    """Persist compactly addressable DRC evidence beside a candidate board."""
+    for filename, payload in (
+        ("before-drc.json", before_drc),
+        ("staged-drc.json", staged_drc),
+        ("drc-regressions.json", regressions),
+    ):
+        (artifacts / filename).write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
 
 
 def _run_offline_placement_candidate(
@@ -787,6 +813,7 @@ def _run_offline_placement_candidate(
     before_drc = board_drc_evidence(root, board_content=before_content)
     staged_drc = board_drc_evidence(root, board_content=staged_content)
     regressions = _drc_regression_details(before_drc, staged_drc)
+    _write_drc_evidence_artifacts(artifacts, before_drc, staged_drc, regressions)
     if regressions["regressed"]:
         return {
             "schema_version": "1.0",
@@ -930,6 +957,7 @@ async def _run_native_board_transaction(
         (artifacts / "edit.diff").write_text(diff_text, encoding="utf-8")
         staged_drc = board_drc_evidence(root, board_content=staged_content)
         regressions = _drc_regression_details(before_drc, staged_drc)
+        _write_drc_evidence_artifacts(artifacts, before_drc, staged_drc, regressions)
         before_summary = cast(dict[str, int], before_drc["summary"])
         staged_summary = cast(dict[str, int], staged_drc["summary"])
         # KiCad reports physical DRC violations and unrouted items in separate
@@ -1142,6 +1170,7 @@ def _run_guarded_file_placement_transaction(
     (artifacts / "edit.diff").write_text(diff_text, encoding="utf-8")
     staged_drc = board_drc_evidence(root, board_content=staged_content)
     regressions = _drc_regression_details(before_drc, staged_drc)
+    _write_drc_evidence_artifacts(artifacts, before_drc, staged_drc, regressions)
     before_summary = cast(dict[str, int], before_drc["summary"])
     staged_summary = cast(dict[str, int], staged_drc["summary"])
     before_physical = before_summary.get("violations", 0)
