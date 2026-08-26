@@ -3374,6 +3374,7 @@ def _register_schematic_sync_tools(mcp: FastMCP) -> None:
         replace_mismatched: bool = False,
         force: bool = False,
         auto_place: bool = True,
+        skip_references: list[str] | None = None,
     ) -> str:
         """Sync missing PCB footprints from schematic footprint assignments.
 
@@ -3382,6 +3383,8 @@ def _register_schematic_sync_tools(mcp: FastMCP) -> None:
         references, values, rotations, and assigned `Library:Footprint` names.
         When `replace_mismatched=True`, existing footprints with the same
         reference but the wrong footprint name are replaced in place.
+        ``skip_references`` permits an explicit, exact-reference mechanical holdout
+        without weakening validation for any other schematic component.
         """
         payload = SyncPcbFromSchematicInput(
             origin_x_mm=origin_x_mm,
@@ -3394,6 +3397,7 @@ def _register_schematic_sync_tools(mcp: FastMCP) -> None:
             replace_mismatched=replace_mismatched,
             force=force,
             auto_place=auto_place,
+            skip_references=skip_references or [],
         )
         if _board_is_open() and not payload.allow_open_board:
             return (
@@ -3413,9 +3417,28 @@ def _register_schematic_sync_tools(mcp: FastMCP) -> None:
         if not components:
             return "No schematic symbols were found to sync."
 
+        requested_skips = [reference.strip() for reference in payload.skip_references]
+        if any(not reference for reference in requested_skips):
+            return "PCB sync aborted because skip_references contains an empty reference."
+        if len(requested_skips) != len(set(requested_skips)):
+            return "PCB sync aborted because skip_references contains duplicate references."
+        schematic_references = {str(component["reference"]) for component in components}
+        unknown_skips = sorted(set(requested_skips) - schematic_references)
+        if unknown_skips:
+            return (
+                "PCB sync aborted because skip_references contains unknown schematic refs:\n"
+                + "\n".join(f"- {reference}" for reference in unknown_skips)
+            )
+        skipped_references = set(requested_skips)
+        sync_components = [
+            component
+            for component in components
+            if str(component["reference"]) not in skipped_references
+        ]
+
         missing_assignments = [
             component["reference"]
-            for component in components
+            for component in sync_components
             if not str(component["footprint"]).strip()
         ]
         if missing_assignments:
@@ -3431,12 +3454,12 @@ def _register_schematic_sync_tools(mcp: FastMCP) -> None:
         )
         existing = _parse_board_footprint_blocks(board_content)
         components_by_reference = {
-            str(component["reference"]): component for component in components
+            str(component["reference"]): component for component in sync_components
         }
 
         expected_names = {
             str(component["reference"]): _split_footprint_assignment(str(component["footprint"]))[1]
-            for component in components
+            for component in sync_components
         }
         mismatched_references = [
             reference
@@ -3455,7 +3478,7 @@ def _register_schematic_sync_tools(mcp: FastMCP) -> None:
         net_note = ""
         if payload.use_net_names:
             net_map, net_note = _export_schematic_net_map()
-        pad_summary = _schematic_pad_net_summary(components, net_map)
+        pad_summary = _schematic_pad_net_summary(sync_components, net_map)
 
         additions: list[str] = []
         replacements: dict[str, str] = {}
@@ -3470,7 +3493,9 @@ def _register_schematic_sync_tools(mcp: FastMCP) -> None:
             if entry["x_mm"] is not None and entry["y_mm"] is not None
         ]
         components_to_add = [
-            component for component in components if str(component["reference"]) not in existing
+            component
+            for component in sync_components
+            if str(component["reference"]) not in existing
         ]
         placements = _planned_board_positions(components_to_add, payload, occupied_boxes)
 
@@ -3520,7 +3545,10 @@ def _register_schematic_sync_tools(mcp: FastMCP) -> None:
                 )
 
         if not additions and not mismatches:
-            return "The PCB already contains all schematic footprint assignments."
+            message = "The PCB already contains all selected schematic footprint assignments."
+            if skipped_references:
+                message += "\nSkipped schematic refs: " + ", ".join(sorted(skipped_references))
+            return message
 
         if additions or replacements:
             _transactional_board_write(
@@ -3540,7 +3568,10 @@ def _register_schematic_sync_tools(mcp: FastMCP) -> None:
         )
 
         lines = [
-            f"Schematic components considered: {len(components)}",
+            f"Schematic components found: {len(components)}",
+            f"Schematic components considered: {len(sync_components)}",
+            "Skipped schematic refs: "
+            + (", ".join(sorted(skipped_references)) if skipped_references else "(none)"),
             f"Existing PCB footprints kept: {len(existing) - len(replacements)}",
             f"New footprints added: {len(additions)}",
             f"Mismatched footprints replaced: {len(replacements)}",

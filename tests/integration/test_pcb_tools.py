@@ -331,6 +331,100 @@ async def test_pcb_sync_from_schematic_adds_missing_footprints(
 
 
 @pytest.mark.anyio
+async def test_pcb_sync_from_schematic_skips_exact_mechanical_holdout(
+    sample_project,
+    mock_kicad,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _allow_schematic_sync(monkeypatch)
+    monkeypatch.setattr("kicad_mcp.tools.pcb._board_is_open", lambda: False)
+    monkeypatch.setattr("kicad_mcp.tools.pcb._export_schematic_net_map", lambda: ({}, ""))
+    server = build_server("full")
+
+    await call_tool_text(
+        server,
+        "sch_build_circuit",
+        {
+            "symbols": [
+                {
+                    "library": "Device",
+                    "symbol_name": "R",
+                    "reference": "R1",
+                    "value": "10k",
+                    "footprint": "Resistor_SMD:R_0805",
+                    "x_mm": 50.8,
+                    "y_mm": 50.8,
+                },
+                {
+                    "library": "Connector_Generic",
+                    "symbol_name": "Conn_01x08",
+                    "reference": "J6",
+                    "value": "MECHANICAL_HOLDOUT",
+                    "footprint": "",
+                    "x_mm": 76.2,
+                    "y_mm": 50.8,
+                },
+            ]
+        },
+    )
+
+    blocked = await call_tool_text(server, "pcb_sync_from_schematic", {})
+    assert "missing footprint assignments" in blocked
+    assert "- J6" in blocked
+
+    result = await call_tool_text(
+        server,
+        "pcb_sync_from_schematic",
+        {"skip_references": ["J6"]},
+    )
+    pcb_text = (sample_project / "demo.kicad_pcb").read_text(encoding="utf-8")
+
+    assert "Schematic components found: 2" in result
+    assert "Schematic components considered: 1" in result
+    assert "Skipped schematic refs: J6" in result
+    assert "New footprints added: 1" in result
+    assert '(property "Reference" "R1"' in pcb_text
+    assert '(property "Reference" "J6"' not in pcb_text
+
+
+@pytest.mark.anyio
+async def test_pcb_sync_from_schematic_rejects_unknown_skip_reference(
+    sample_project,
+    mock_kicad,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _allow_schematic_sync(monkeypatch)
+    monkeypatch.setattr("kicad_mcp.tools.pcb._board_is_open", lambda: False)
+    server = build_server("full")
+    await call_tool_text(
+        server,
+        "sch_build_circuit",
+        {
+            "symbols": [
+                {
+                    "library": "Device",
+                    "symbol_name": "R",
+                    "reference": "R1",
+                    "value": "10k",
+                    "footprint": "Resistor_SMD:R_0805",
+                    "x_mm": 50.8,
+                    "y_mm": 50.8,
+                }
+            ]
+        },
+    )
+
+    result = await call_tool_text(
+        server,
+        "pcb_sync_from_schematic",
+        {"skip_references": ["J6"]},
+    )
+
+    assert "unknown schematic refs" in result
+    assert "- J6" in result
+
+
+@pytest.mark.anyio
 async def test_pcb_sync_from_schematic_refuses_when_board_is_open(
     sample_project,
     mock_kicad,
