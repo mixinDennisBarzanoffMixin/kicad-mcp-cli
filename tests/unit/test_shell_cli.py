@@ -31,9 +31,11 @@ from kicad_mcp.shell_cli import (
     _erc_finding_keys,
     _native_move_footprints_batch,
     _placement_batch_requires_guarded_file,
+    _render_candidate_track,
     _resolve_edit_schematic,
     _rewire_tool_calls,
     _schematic_manifest,
+    _stackup_layers_from_spec,
     _verify_rigid_footprint_children,
     _verify_staged_footprint_batch,
     file_records,
@@ -828,6 +830,54 @@ def test_route_plan_uses_astar_around_footprint_obstacle() -> None:
     assert plan["collision_score"] == 0
     assert plan["routing_methods"] == ["astar-grid"]
     assert len(plan["segments"]) >= 3
+
+
+def test_route_plan_keeps_adjacent_endpoint_pads_as_obstacles() -> None:
+    snapshot = copy.deepcopy(_snapshot())
+    snapshot["board"]["footprints"][0]["pads"].append(
+        {"number": "2", "at": [5.0, 5.7], "size": [0.5, 0.5], "net": "GND"}
+    )
+    snapshot["board"]["footprints"][0]["pads"][0]["size"] = [0.5, 0.5]
+    snapshot["board"]["footprints"][1]["pads"][0]["size"] = [0.5, 0.5]
+
+    narrow = route_plan(snapshot, "GPIO", width_mm=0.2, clearance_mm=0.1)
+    wide = route_plan(snapshot, "GPIO", width_mm=1.0, clearance_mm=0.2)
+
+    assert narrow["collision_score"] == 0
+    assert wide["collision_score"] > 0
+
+
+def test_candidate_stackup_spec_and_named_net_track_rendering() -> None:
+    layers = _stackup_layers_from_spec(
+        {
+            "stackup": [
+                {"layer": "F.Cu", "material": "copper", "thickness_mm": 0.035},
+                {
+                    "layer": "dielectric_1",
+                    "material": "FR-4",
+                    "thickness_mm": 0.2,
+                    "epsilon_r": 4.2,
+                },
+                {"layer": "B.Cu", "material": "copper", "thickness_mm": 0.035},
+            ]
+        }
+    )
+    rendered = _render_candidate_track(
+        {
+            "x1": 1.0,
+            "y1": 2.0,
+            "x2": 3.0,
+            "y2": 4.0,
+            "width": 0.25,
+            "layer": "F_Cu",
+            "net": "/USB/D+",
+        }
+    )
+
+    assert [layer.type for layer in layers] == ["signal", "prepreg", "signal"]
+    assert '(layer "F.Cu")' in rendered
+    assert '(net "/USB/D+")' in rendered
+    assert "(uuid " in rendered
 
 
 def test_placement_plan_is_deterministic_and_holds_fixed_references() -> None:

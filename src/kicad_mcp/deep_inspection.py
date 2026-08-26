@@ -2090,6 +2090,7 @@ def route_plan(
             end["at"],
             board,
             clearance=clearance_mm,
+            width_mm=width_mm,
             excluded_refs=excluded_refs,
             net_name=net_name,
         )
@@ -2098,6 +2099,7 @@ def route_plan(
             points,
             board,
             clearance_mm,
+            width_mm=width_mm,
             excluded_refs=excluded_refs,
             net_name=net_name,
         )
@@ -2138,6 +2140,7 @@ def _route_collision_score(
     board: JsonRecord,
     clearance: float,
     *,
+    width_mm: float = 0.0,
     excluded_refs: set[str] | None = None,
     net_name: str = "",
 ) -> int:
@@ -2148,12 +2151,36 @@ def _route_collision_score(
         sx1, sx2 = sorted((first[0], second[0]))
         sy1, sy2 = sorted((first[1], second[1]))
         for footprint in board["footprints"]:
-            if str(footprint["reference"]) in (excluded_refs or set()):
+            reference = str(footprint["reference"])
+            if reference in (excluded_refs or set()):
+                # The route must escape its endpoint footprints, but every
+                # neighboring pad on those packages remains a copper obstacle.
+                # Skipping the whole footprint can short a wide trace into an
+                # adjacent exposed/ground pad even when a centerline looks clear.
+                for pad in footprint.get("pads", []):
+                    if str(pad.get("net", "")) == net_name:
+                        continue
+                    pad_at = pad.get("at", [])
+                    pad_size = pad.get("size", [])
+                    if len(pad_at) != 2 or len(pad_size) != 2:
+                        continue
+                    half_trace = width_mm / 2.0
+                    half_width = float(pad_size[0]) / 2.0 + clearance + half_trace
+                    half_height = float(pad_size[1]) / 2.0 + clearance + half_trace
+                    if _segment_intersects_box(
+                        first,
+                        second,
+                        left=float(pad_at[0]) - half_width,
+                        top=float(pad_at[1]) - half_height,
+                        right=float(pad_at[0]) + half_width,
+                        bottom=float(pad_at[1]) + half_height,
+                    ):
+                        score += 1
                 continue
             cx = float(footprint["x_mm"])
             cy = float(footprint["y_mm"])
-            half_width = float(footprint["width_mm"]) / 2 + clearance
-            half_height = float(footprint["height_mm"]) / 2 + clearance
+            half_width = float(footprint["width_mm"]) / 2 + clearance + width_mm / 2.0
+            half_height = float(footprint["height_mm"]) / 2 + clearance + width_mm / 2.0
             overlaps = (
                 sx2 >= cx - half_width
                 and sx1 <= cx + half_width
@@ -2170,6 +2197,26 @@ def _route_collision_score(
             if _segments_intersect(first, second, track["start"], track["end"], clearance):
                 score += 1
     return score
+
+
+def _segment_intersects_box(
+    first: list[float],
+    second: list[float],
+    *,
+    left: float,
+    top: float,
+    right: float,
+    bottom: float,
+) -> bool:
+    """Conservatively test one orthogonal segment against an axis-aligned box."""
+    segment_left, segment_right = sorted((float(first[0]), float(second[0])))
+    segment_top, segment_bottom = sorted((float(first[1]), float(second[1])))
+    return not (
+        segment_right < left
+        or right < segment_left
+        or segment_bottom < top
+        or bottom < segment_top
+    )
 
 
 def _segments_intersect(
@@ -2216,6 +2263,7 @@ def _orthogonal_route(
     board: JsonRecord,
     *,
     clearance: float,
+    width_mm: float = 0.0,
     excluded_refs: set[str],
     net_name: str,
     grid_mm: float = 0.5,
@@ -2229,6 +2277,7 @@ def _orthogonal_route(
             candidate,
             board,
             clearance,
+            width_mm=width_mm,
             excluded_refs=excluded_refs,
             net_name=net_name,
         )
@@ -2272,6 +2321,7 @@ def _orthogonal_route(
                 segment,
                 board,
                 clearance,
+                width_mm=width_mm,
                 excluded_refs=excluded_refs,
                 net_name=net_name,
             ):

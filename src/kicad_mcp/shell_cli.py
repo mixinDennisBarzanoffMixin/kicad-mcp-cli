@@ -50,6 +50,7 @@ from .deep_inspection import (
     verification_report,
 )
 from .endpoint_net_equality import compare_compiled_endpoint_nets
+from .models.pcb import StackupLayerSpec
 from .pcb.board_access import board_footprints
 from .schematic_graph_placement import (
     format_schematic_graph_placement,
@@ -60,6 +61,7 @@ from .schematic_rewire_plan import format_label_compaction_plan, plan_label_comp
 from .schematic_spatial import schematic_spatial_map
 from .server import build_server
 from .tools.board_file import FLOAT_PATTERN, _iter_blocks, _parse_board_footprint_blocks
+from .tools.pcb import _append_board_blocks, _apply_stackup_to_board
 from .tools.router import TOOL_CATEGORIES, available_profiles
 
 JSONValue = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
@@ -887,6 +889,192 @@ def _run_offline_candidate_refinement(
             if rejected
             else "refined offline candidate passes the DRC regression gate"
         ),
+        "before_drc": before_drc,
+        "staged_drc": staged_drc,
+        "regressions": regressions,
+        "artifacts": str(artifacts),
+        "candidate": str(artifacts / "staged.kicad_pcb"),
+        "diff": str(artifacts / "edit.diff"),
+        "diff_lines": len(diff_text.splitlines()),
+    }
+
+
+def _board_root_transforms(content: str) -> dict[str, tuple[float, float, float]]:
+    """Return stable footprint root transforms for candidate mutation proofs."""
+    return {
+        reference: (
+            float(footprint["x_mm"]),
+            float(footprint["y_mm"]),
+            float(footprint.get("rotation", 0.0) or 0.0),
+        )
+        for reference, footprint in _parse_board_footprint_blocks(content).items()
+    }
+
+
+def _candidate_diff_artifacts(
+    *,
+    before_content: str,
+    staged_content: str,
+    artifacts: Path,
+) -> str:
+    """Persist the common before/staged/diff artifacts and return the diff."""
+    artifacts.mkdir(parents=True, exist_ok=True)
+    (artifacts / "before.kicad_pcb").write_text(before_content, encoding="utf-8")
+    (artifacts / "staged.kicad_pcb").write_text(staged_content, encoding="utf-8")
+    diff_text = "".join(
+        difflib.unified_diff(
+            before_content.splitlines(keepends=True),
+            staged_content.splitlines(keepends=True),
+            fromfile="before.kicad_pcb",
+            tofile="staged.kicad_pcb",
+        )
+    )
+    (artifacts / "edit.diff").write_text(diff_text, encoding="utf-8")
+    return diff_text
+
+
+def _stackup_layers_from_spec(spec: dict[str, Any]) -> list[StackupLayerSpec]:
+    """Translate the CLI routing-spec vocabulary into KiCad stackup layers."""
+    raw_layers = spec.get("stackup", [])
+    if not isinstance(raw_layers, list) or len(raw_layers) < 2:
+        raise ValueError("routing spec must contain a stackup array with at least two layers")
+    layers: list[StackupLayerSpec] = []
+    for index, raw in enumerate(raw_layers, start=1):
+        if not isinstance(raw, dict):
+            raise ValueError(f"stackup layer {index} must be an object")
+        name = str(raw.get("layer", raw.get("name", ""))).strip()
+        material = str(raw.get("material", "")).strip()
+        if not name or not material:
+            raise ValueError(f"stackup layer {index} requires layer/name and material")
+        normalized_name = name.replace(".", "_")
+        copper = material.casefold() == "copper" or normalized_name.endswith("_Cu")
+        default_type = "signal" if copper else ("core" if name == "core" else "prepreg")
+        if normalized_name in {"In1_Cu", "In2_Cu"}:
+            default_type = "power"
+        layers.append(
+            StackupLayerSpec.model_validate(
+                {
+                    "name": name,
+                    "type": str(raw.get("type", default_type)),
+                    "thickness_mm": raw.get("thickness_mm"),
+                    "material": material,
+                    "epsilon_r": raw.get("epsilon_r"),
+                    "loss_tangent": raw.get("loss_tangent"),
+                }
+            )
+        )
+    return layers
+
+
+def _run_offline_stackup_candidate(
+    *,
+    root: Path,
+    before_content: str,
+    layers: list[StackupLayerSpec],
+    artifacts: Path,
+    source: str,
+    spec_source: str,
+) -> dict[str, Any]:
+    """Program stackup on an offline board while proving geometry is unchanged."""
+    staged_content = _apply_stackup_to_board(before_content, layers)
+    before_transforms = _board_root_transforms(before_content)
+    staged_transforms = _board_root_transforms(staged_content)
+    if staged_transforms != before_transforms:
+        raise RuntimeError("stackup programming changed one or more footprint root transforms")
+    diff_text = _candidate_diff_artifacts(
+        before_content=before_content,
+        staged_content=staged_content,
+        artifacts=artifacts,
+    )
+    before_drc = board_drc_evidence(root, board_content=before_content)
+    staged_drc = board_drc_evidence(root, board_content=staged_content)
+    regressions = _drc_regression_details(before_drc, staged_drc)
+    _write_drc_evidence_artifacts(artifacts, before_drc, staged_drc, regressions)
+    rejected = bool(regressions["regressed"])
+    return {
+        "schema_version": "1.0",
+        "status": "rejected" if rejected else "pass",
+        "committed": False,
+        "candidate_verified": not rejected,
+        "candidate_authority": "explicit-offline-candidate",
+        "candidate_source": source,
+        "spec_source": spec_source,
+        "reason": (
+            "stackup candidate introduces new DRC findings"
+            if rejected
+            else "stackup candidate preserves all footprint transforms and DRC findings"
+        ),
+        "stackup": [layer.model_dump(mode="json", exclude_none=True) for layer in layers],
+        "total_thickness_mm": round(sum(layer.thickness_mm for layer in layers), 4),
+        "verified_footprint_transforms": len(before_transforms),
+        "before_drc": before_drc,
+        "staged_drc": staged_drc,
+        "regressions": regressions,
+        "artifacts": str(artifacts),
+        "candidate": str(artifacts / "staged.kicad_pcb"),
+        "diff": str(artifacts / "edit.diff"),
+        "diff_lines": len(diff_text.splitlines()),
+    }
+
+
+def _render_candidate_track(segment: dict[str, Any]) -> str:
+    """Serialize one KiCad 10 named-net segment for offline candidate DRC."""
+    layer = str(segment["layer"]).replace("_", ".")
+    return "\n".join(
+        [
+            "(segment",
+            f"\t(start {float(segment['x1']):.6f} {float(segment['y1']):.6f})",
+            f"\t(end {float(segment['x2']):.6f} {float(segment['y2']):.6f})",
+            f"\t(width {float(segment['width']):.6f})",
+            f'\t(layer "{layer}")',
+            f'\t(net {json.dumps(str(segment["net"]))})',
+            f"\t(uuid {uuid.uuid4()})",
+            ")",
+        ]
+    )
+
+
+def _run_offline_route_candidate(
+    *,
+    root: Path,
+    before_content: str,
+    segments: list[dict[str, Any]],
+    artifacts: Path,
+    source: str,
+) -> dict[str, Any]:
+    """Append reviewed tracks to an offline candidate and gate them with KiCad DRC."""
+    if not segments:
+        raise ValueError("offline route candidate requires at least one segment")
+    staged_content = _append_board_blocks(
+        before_content,
+        [_render_candidate_track(segment) for segment in segments],
+    )
+    if _board_root_transforms(staged_content) != _board_root_transforms(before_content):
+        raise RuntimeError("route candidate changed one or more footprint root transforms")
+    diff_text = _candidate_diff_artifacts(
+        before_content=before_content,
+        staged_content=staged_content,
+        artifacts=artifacts,
+    )
+    before_drc = board_drc_evidence(root, board_content=before_content)
+    staged_drc = board_drc_evidence(root, board_content=staged_content)
+    regressions = _drc_regression_details(before_drc, staged_drc)
+    _write_drc_evidence_artifacts(artifacts, before_drc, staged_drc, regressions)
+    rejected = bool(regressions["regressed"])
+    return {
+        "schema_version": "1.0",
+        "status": "rejected" if rejected else "pass",
+        "committed": False,
+        "candidate_verified": not rejected,
+        "candidate_authority": "explicit-offline-candidate",
+        "candidate_source": source,
+        "reason": (
+            "route candidate introduces new physical DRC findings or more unrouted items"
+            if rejected
+            else "route candidate preserves physical DRC and does not increase unrouted items"
+        ),
+        "segments_added": len(segments),
+        "verified_footprint_transforms": len(_board_root_transforms(before_content)),
         "before_drc": before_drc,
         "staged_drc": staged_drc,
         "regressions": regressions,
@@ -1877,10 +2065,27 @@ def build_parser() -> argparse.ArgumentParser:
     route.add_argument("--width", type=float, default=0.25, dest="width_mm")
     route.add_argument("--clearance", type=float, default=0.5, dest="clearance_mm")
     route.add_argument("--allow-critical", action="store_true")
+    route.add_argument(
+        "--board-candidate",
+        default="",
+        metavar="FILE",
+        help="plan against and optionally refine an offline .kicad_pcb candidate",
+    )
     route.add_argument("--apply", action="store_true")
     route.add_argument("--yes", action="store_true", help="confirm route mutation")
     route.add_argument("--artifacts", default="", metavar="DIR")
     route.add_argument("--format", choices=("json", "jsonl"), default="json")
+
+    stackup = subcommands.add_parser(
+        "stackup",
+        help="program and DRC a fabrication stackup on an offline PCB candidate",
+    )
+    stackup.add_argument("--spec", required=True, metavar="JSON")
+    stackup.add_argument("--board-candidate", required=True, metavar="FILE")
+    stackup.add_argument("--apply", action="store_true")
+    stackup.add_argument("--yes", action="store_true")
+    stackup.add_argument("--artifacts", default="", metavar="DIR")
+    stackup.add_argument("--format", choices=("json",), default="json")
 
     place = subcommands.add_parser(
         "place", help="plan connectivity-aware PCB placement from existing footprints"
@@ -2328,6 +2533,58 @@ def main(argv: Sequence[str] | None = None) -> None:
             if report["status"] == "rejected":
                 raise SystemExit(3)
             return
+        if args.command == "stackup":
+            project_root = Path(args.project_dir or ".").expanduser().resolve()
+            candidate_path = Path(args.board_candidate).expanduser()
+            spec_path = Path(args.spec).expanduser()
+            if not candidate_path.is_absolute():
+                candidate_path = project_root / candidate_path
+            if not spec_path.is_absolute():
+                spec_path = project_root / spec_path
+            if not candidate_path.is_file():
+                raise ValueError(f"board candidate does not exist: {candidate_path}")
+            if not spec_path.is_file():
+                raise ValueError(f"routing spec does not exist: {spec_path}")
+            spec = _parse_json_object(
+                spec_path.read_text(encoding="utf-8"), source=str(spec_path)
+            )
+            layers = _stackup_layers_from_spec(spec)
+            if not args.apply:
+                report = {
+                    "schema_version": "1.0",
+                    "status": "planned",
+                    "committed": False,
+                    "candidate_source": str(candidate_path),
+                    "spec_source": str(spec_path),
+                    "stackup": [
+                        layer.model_dump(mode="json", exclude_none=True) for layer in layers
+                    ],
+                    "total_thickness_mm": round(
+                        sum(layer.thickness_mm for layer in layers), 4
+                    ),
+                }
+            else:
+                if args.mode not in {"write", "experimental"}:
+                    raise ValueError("--apply requires --mode write or --mode experimental")
+                if not args.yes:
+                    raise ValueError("--apply requires --yes after reviewing the stackup")
+                artifacts = (
+                    Path(args.artifacts).expanduser().resolve()
+                    if args.artifacts
+                    else project_root / "build" / "kicadq-transactions" / "stackup"
+                )
+                report = _run_offline_stackup_candidate(
+                    root=project_root,
+                    before_content=candidate_path.read_text(encoding="utf-8"),
+                    layers=layers,
+                    artifacts=artifacts,
+                    source=str(candidate_path),
+                    spec_source=str(spec_path),
+                )
+            print(json.dumps(report, indent=2, sort_keys=True))
+            if report["status"] == "rejected":
+                raise SystemExit(3)
+            return
         if args.command == "power-loops":
             project_root = Path(args.project_dir or ".").expanduser().resolve()
             spec_path = Path(args.spec).expanduser()
@@ -2479,8 +2736,24 @@ def main(argv: Sequence[str] | None = None) -> None:
                 raise SystemExit(3)
             return
         if args.command == "route":
+            project_root = Path(args.project_dir or ".").expanduser().resolve()
+            candidate_path = (
+                Path(args.board_candidate).expanduser() if args.board_candidate else None
+            )
+            if candidate_path is not None and not candidate_path.is_absolute():
+                candidate_path = project_root / candidate_path
+            if candidate_path is not None and not candidate_path.is_file():
+                raise ValueError(f"board candidate does not exist: {candidate_path}")
             plan = route_plan(
-                project_snapshot(args.project_dir or "."),
+                project_snapshot(
+                    project_root,
+                    board_content=(
+                        candidate_path.read_text(encoding="utf-8")
+                        if candidate_path is not None
+                        else None
+                    ),
+                    board_source=str(candidate_path) if candidate_path is not None else "",
+                ),
                 args.net,
                 layer=args.layer,
                 width_mm=args.width_mm,
@@ -2495,17 +2768,41 @@ def main(argv: Sequence[str] | None = None) -> None:
                 if plan["status"] != "planned":
                     reason = plan.get("reason", plan["status"])
                     raise ValueError(f"route cannot be applied: {reason}")
-                transaction = asyncio.run(
-                    run_native_board_transaction(
-                        args,
-                        [("pcb_add_tracks_bulk", {"tracks": plan["segments"]})],
-                        label=f"route-{args.net}",
+                if int(plan.get("collision_score", 0)):
+                    raise ValueError(
+                        "route plan intersects one or more obstacles; refine placement or route "
+                        "before applying"
                     )
-                )
+                if candidate_path is not None:
+                    artifacts = (
+                        Path(args.artifacts).expanduser().resolve()
+                        if args.artifacts
+                        else project_root
+                        / "build"
+                        / "kicadq-transactions"
+                        / f"route-{args.net.replace('/', '_')}"
+                    )
+                    transaction = _run_offline_route_candidate(
+                        root=project_root,
+                        before_content=candidate_path.read_text(encoding="utf-8"),
+                        segments=cast(list[dict[str, Any]], plan["segments"]),
+                        artifacts=artifacts,
+                        source=str(candidate_path),
+                    )
+                else:
+                    transaction = asyncio.run(
+                        run_native_board_transaction(
+                            args,
+                            [("pcb_add_tracks_bulk", {"tracks": plan["segments"]})],
+                            label=f"route-{args.net}",
+                        )
+                    )
                 plan["transaction"] = transaction
                 if transaction["status"] in {"rejected", "blocked"}:
                     plan["status"] = transaction["status"]
                     plan["reason"] = transaction["reason"]
+                else:
+                    plan["status"] = "applied"
             indent = 2 if args.format == "json" else None
             print(
                 json.dumps(
