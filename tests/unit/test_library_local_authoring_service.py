@@ -43,6 +43,41 @@ def test_assign_footprint_preserves_missing_and_update_behavior(tmp_path: Path) 
     assert updates == [("R1", "Footprint", "Resistor_SMD:R_0805")]
 
 
+def test_assign_footprint_targets_explicit_child_sheet(tmp_path: Path) -> None:
+    module = _module()
+    footprint = tmp_path / "J_1x03.kicad_mod"
+    footprint.write_text("(footprint)", encoding="utf-8")
+    targeted: list[tuple[object, ...]] = []
+    service = module.LibraryLocalAuthoringService(
+        footprint_file=lambda _library, _footprint: footprint,
+        update_symbol_property=lambda _ref, _field, _value: None,
+        update_symbol_property_targeted=lambda ref, field, value, sheet, sheet_file: (
+            targeted.append((ref, field, value, sheet, sheet_file)) or "Updated J2.Footprint"
+        ),
+        project_dir=lambda: tmp_path,
+    )
+
+    result = service.assign_footprint(
+        "J2",
+        "Connector_Molex",
+        "J_1x03",
+        sheet_file="01_Power.kicad_sch",
+    )
+
+    assert targeted == [
+        (
+            "J2",
+            "Footprint",
+            "Connector_Molex:J_1x03",
+            None,
+            "01_Power.kicad_sch",
+        )
+    ]
+    assert "Assigned footprint 'Connector_Molex:J_1x03' to 'J2'." in result
+    assert "Updated J2.Footprint" in result
+    assert "Child schematic updated" in result
+
+
 def test_create_custom_symbol_requires_active_project() -> None:
     module = _module()
     service = module.LibraryLocalAuthoringService(

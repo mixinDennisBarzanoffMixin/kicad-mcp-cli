@@ -23,8 +23,15 @@ class FakeService:
     def __init__(self) -> None:
         self.calls: list[tuple[object, ...]] = []
 
-    def assign_footprint(self, reference: str, library: str, footprint: str) -> str:
-        self.calls.append(("assign", reference, library, footprint))
+    def assign_footprint(
+        self,
+        reference: str,
+        library: str,
+        footprint: str,
+        sheet: str | None = None,
+        sheet_file: str | None = None,
+    ) -> str:
+        self.calls.append(("assign", reference, library, footprint, sheet, sheet_file))
         return "assigned"
 
     def create_custom_symbol(self, name: str, pins: list[dict[str, object]]) -> str:
@@ -43,13 +50,23 @@ def test_registration_preserves_exact_contract_and_delegation() -> None:
     by_name = {tool.name: tool for tool in tools}
     assert (
         by_name["lib_assign_footprint"].description
-        == "Assign a footprint property to a schematic symbol."
+        == "Assign a footprint property to a root or explicitly selected child-sheet symbol."
     )
     assert by_name["lib_assign_footprint"].parameters == {
         "properties": {
             "reference": {"title": "Reference", "type": "string"},
             "library": {"title": "Library", "type": "string"},
             "footprint": {"title": "Footprint", "type": "string"},
+            "sheet": {
+                "anyOf": [{"type": "string"}, {"type": "null"}],
+                "default": None,
+                "title": "Sheet",
+            },
+            "sheet_file": {
+                "anyOf": [{"type": "string"}, {"type": "null"}],
+                "default": None,
+                "title": "Sheet File",
+            },
         },
         "required": ["reference", "library", "footprint"],
         "title": "lib_assign_footprintArguments",
@@ -81,7 +98,7 @@ def test_registration_preserves_exact_contract_and_delegation() -> None:
     pins: list[dict[str, object]] = [{"number": "1", "name": "A"}]
     assert by_name["lib_create_custom_symbol"].fn("Demo", pins) == "created"
     assert service.calls == [
-        ("assign", "R1", "Resistor_SMD", "R_0805"),
+        ("assign", "R1", "Resistor_SMD", "R_0805", None, None),
         ("create", "Demo", pins),
     ]
 

@@ -81,15 +81,39 @@ class LibraryLocalAuthoringService:
     footprint_file: Callable[[str, str], Path]
     update_symbol_property: Callable[[str, str, str], object]
     project_dir: Callable[[], Path | None]
+    update_symbol_property_targeted: (
+        Callable[[str, str, str, str | None, str | None], object] | None
+    ) = None
     upgrade_symbol_library: Callable[[Path], UpgradeResultProtocol | None] | None = None
     resolve_within_project: Callable[[str], Path] | None = None
     default_output_dir: Callable[[], Path] | None = None
 
-    def assign_footprint(self, reference: str, library: str, footprint: str) -> str:
+    def assign_footprint(
+        self,
+        reference: str,
+        library: str,
+        footprint: str,
+        sheet: str | None = None,
+        sheet_file: str | None = None,
+    ) -> str:
         path = self.footprint_file(library, footprint)
         if not path.exists():
             return f"Footprint '{library}:{footprint}' was not found."
         assignment = f"{library}:{footprint}"
+        if sheet or sheet_file:
+            if self.update_symbol_property_targeted is None:
+                return "Child-sheet footprint assignment is not configured for this backend."
+            result = self.update_symbol_property_targeted(
+                reference,
+                "Footprint",
+                assignment,
+                sheet,
+                sheet_file,
+            )
+            return (
+                f"Assigned footprint '{assignment}' to '{reference}'.\n"
+                f"{result}\nChild schematic updated; reload it in KiCad if open."
+            )
         self.update_symbol_property(reference, "Footprint", assignment)
         return f"Assigned footprint '{assignment}' to '{reference}'."
 

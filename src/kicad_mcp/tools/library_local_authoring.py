@@ -11,7 +11,14 @@ from .metadata import headless_compatible
 
 
 class LibraryLocalAuthoringServiceProtocol(Protocol):
-    def assign_footprint(self, reference: str, library: str, footprint: str) -> str: ...
+    def assign_footprint(
+        self,
+        reference: str,
+        library: str,
+        footprint: str,
+        sheet: str | None = None,
+        sheet_file: str | None = None,
+    ) -> str: ...
 
     def create_custom_symbol(self, name: str, pins: list[dict[str, Any]]) -> str: ...
 
@@ -37,9 +44,21 @@ def register(mcp: FastMCP, deps: LibraryLocalAuthoringDependencies) -> None:
 
     @mcp.tool()
     @headless_compatible
-    def lib_assign_footprint(reference: str, library: str, footprint: str) -> str:
-        """Assign a footprint property to a schematic symbol."""
-        return deps.service.assign_footprint(reference, library, footprint)
+    def lib_assign_footprint(
+        reference: str,
+        library: str,
+        footprint: str,
+        sheet: str | None = None,
+        sheet_file: str | None = None,
+    ) -> str:
+        """Assign a footprint property to a root or explicitly selected child-sheet symbol."""
+        return deps.service.assign_footprint(
+            reference,
+            library,
+            footprint,
+            sheet,
+            sheet_file,
+        )
 
     @mcp.tool()
     @headless_compatible

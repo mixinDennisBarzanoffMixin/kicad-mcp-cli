@@ -5457,6 +5457,7 @@ def _transactional_write_to_schematic_file(
     mutator: Callable[[str], str],
     *,
     allow_node_loss: bool = False,
+    normalize_connectivity: bool = True,
 ) -> str:
     """Read, mutate, validate, and atomically rewrite a schematic file.
 
@@ -5467,7 +5468,9 @@ def _transactional_write_to_schematic_file(
     with _SCHEMATIC_WRITE_LOCK:
         sch_file = sch_file.resolve()
         current = sch_file.read_text(encoding="utf-8")
-        updated = _normalize_schematic_wire_connectivity(mutator(current))
+        updated = mutator(current)
+        if normalize_connectivity:
+            updated = _normalize_schematic_wire_connectivity(updated)
         updated = re.sub(r"(?m)^[ \t]+$", "", updated)
         _validate_schematic_text(updated)
         _guard_schematic_structural_loss(
@@ -5883,7 +5886,7 @@ def _update_symbol_property_in_file(
             updated = updated[:start] + new_block + updated[end:]
         return updated
 
-    _transactional_write_to_schematic_file(path, mutator)
+    _transactional_write_to_schematic_file(path, mutator, normalize_connectivity=False)
     return f"Updated {reference}.{field} on {updated_count} instance(s) in {path.name}."
 
 

@@ -49,7 +49,13 @@ from . import (
     library_sourcing,
 )
 from .export_support import _run_cli
-from .schematic import get_schematic_backend, project_schematic_files, update_symbol_property
+from .schematic import (
+    _resolve_schematic_target,
+    _update_symbol_property_in_file,
+    get_schematic_backend,
+    project_schematic_files,
+    update_symbol_property,
+)
 
 # Compatibility alias retained for downstream/tests that historically imported it here.
 _parse_lib_table = _shared_parse_lib_table
@@ -461,6 +467,14 @@ def register(mcp: FastMCP) -> None:
         footprint_file=lambda library, footprint: _footprint_file(library, footprint),
         update_symbol_property=lambda reference, field, value: update_symbol_property(
             reference, field, value
+        ),
+        update_symbol_property_targeted=lambda reference, field, value, sheet, sheet_file: (
+            _update_symbol_property_in_file(
+                _resolve_schematic_target(sheet=sheet, sheet_file=sheet_file).path,
+                reference,
+                field,
+                value,
+            )
         ),
         project_dir=lambda: get_config().project_dir,
         resolve_within_project=lambda path: get_config().resolve_within_project(path),

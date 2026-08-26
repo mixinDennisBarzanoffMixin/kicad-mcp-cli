@@ -3,7 +3,7 @@
     "build": {
       "callableTools": 24,
       "catalogCharacters": 9348,
-      "catalogReductionVsExpertPct": 96.0,
+      "catalogReductionVsExpertPct": 96.1,
       "declaredTools": 24,
       "estimatedCatalogTokens": 2337,
       "forbiddenToolExposures": 2,
@@ -94,10 +94,10 @@
     },
     "expert": {
       "callableTools": 393,
-      "catalogCharacters": 236150,
+      "catalogCharacters": 236760,
       "catalogReductionVsExpertPct": 0.0,
       "declaredTools": 393,
-      "estimatedCatalogTokens": 59038,
+      "estimatedCatalogTokens": 59190,
       "forbiddenToolExposures": 8,
       "goldenCases": 65,
       "goldenCasesCovered": 55,
@@ -510,7 +510,7 @@
     "release": {
       "callableTools": 24,
       "catalogCharacters": 7213,
-      "catalogReductionVsExpertPct": 96.9,
+      "catalogReductionVsExpertPct": 97.0,
       "declaredTools": 24,
       "estimatedCatalogTokens": 1804,
       "forbiddenToolExposures": 0,
