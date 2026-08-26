@@ -1742,10 +1742,10 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SHEET,X1,Y1,X2,Y2",
         help="constrain one hierarchical sheet to an absolute board region; repeatable",
     )
-    place.add_argument("--margin", type=float, default=3.0, dest="margin_mm")
-    place.add_argument("--iterations", type=int, default=300)
-    place.add_argument("--grid", type=float, default=0.5, dest="grid_mm")
-    place.add_argument("--seed", type=int, default=42)
+    place.add_argument("--margin", type=float, default=None, dest="margin_mm")
+    place.add_argument("--iterations", type=int, default=None)
+    place.add_argument("--grid", type=float, default=None, dest="grid_mm")
+    place.add_argument("--seed", type=int, default=None)
     place.add_argument(
         "--spec",
         default=".kicad-mcp/project_spec.json",
@@ -2201,12 +2201,31 @@ def main(argv: Sequence[str] | None = None) -> None:
                 raise SystemExit(3)
             return
         if args.command == "place":
+            project_root = Path(args.project_dir or ".").expanduser().resolve()
+            spec: dict[str, Any] = {}
+            spec_path = Path(args.spec).expanduser()
+            if not spec_path.is_absolute():
+                spec_path = project_root / spec_path
+            if spec_path.is_file():
+                spec = _parse_json_object(
+                    spec_path.read_text(encoding="utf-8"), source=str(spec_path)
+                )
+            floorplan_raw = spec.get("placement_floorplan", {})
+            floorplan = (
+                cast(dict[str, Any], floorplan_raw) if isinstance(floorplan_raw, dict) else {}
+            )
             keepouts: list[list[float]] = []
             for raw in args.keepout_regions:
                 values = [float(value.strip()) for value in raw.split(",")]
                 if len(values) != 4:
                     raise ValueError("--keepout requires X1,Y1,X2,Y2")
                 keepouts.append(values)
+            if not keepouts:
+                keepouts = [
+                    [float(value) for value in region]
+                    for region in floorplan.get("keepout_regions", [])
+                    if isinstance(region, list) and len(region) == 4
+                ]
             clusters: list[dict[str, Any]] = []
             for raw in args.cluster_regions:
                 values = [value.strip() for value in raw.split(",")]
@@ -2221,6 +2240,12 @@ def main(argv: Sequence[str] | None = None) -> None:
                         "y2_mm": float(values[4]),
                     }
                 )
+            if not clusters:
+                clusters = [
+                    cast(dict[str, Any], dict(region))
+                    for region in floorplan.get("cluster_regions", [])
+                    if isinstance(region, dict)
+                ]
             anchors: list[dict[str, Any]] = []
             for raw in args.anchors:
                 values = [value.strip() for value in raw.split(",")]
@@ -2246,32 +2271,50 @@ def main(argv: Sequence[str] | None = None) -> None:
                 if len(values) == 4:
                     anchor["rotation"] = float(values[3])
                 anchors.append(anchor)
-            project_root = Path(args.project_dir or ".").expanduser().resolve()
+            if not anchors:
+                anchors = [
+                    cast(dict[str, Any], dict(anchor))
+                    for anchor in floorplan.get("anchors", [])
+                    if isinstance(anchor, dict)
+                ]
+            fixed_references = list(args.fixed_references)
+            if not fixed_references:
+                fixed_references = [
+                    str(value) for value in floorplan.get("fixed_references", [])
+                ]
             proximity_pairs: list[dict[str, Any]] = []
-            spec_path = Path(args.spec).expanduser()
-            if not spec_path.is_absolute():
-                spec_path = project_root / spec_path
-            if spec_path.is_file():
-                spec = _parse_json_object(
-                    spec_path.read_text(encoding="utf-8"), source=str(spec_path)
-                )
+            if spec:
                 raw_pairs = spec.get("decoupling_pairs", [])
                 if not isinstance(raw_pairs, list):
                     raise ValueError(f"{spec_path}: decoupling_pairs must be a JSON array")
                 proximity_pairs = [
                     cast(dict[str, Any], pair) for pair in raw_pairs if isinstance(pair, dict)
                 ]
+            margin_mm = float(
+                args.margin_mm
+                if args.margin_mm is not None
+                else floorplan.get("margin_mm", 3.0)
+            )
+            iterations = int(
+                args.iterations
+                if args.iterations is not None
+                else floorplan.get("iterations", 300)
+            )
+            grid_mm = float(
+                args.grid_mm if args.grid_mm is not None else floorplan.get("grid_mm", 0.5)
+            )
+            seed = int(args.seed if args.seed is not None else floorplan.get("seed", 42))
             plan = placement_plan(
                 project_snapshot(project_root),
-                fixed_references=args.fixed_references,
+                fixed_references=fixed_references,
                 anchors=anchors,
                 cluster_regions=clusters,
                 keepout_regions=keepouts,
                 proximity_pairs=proximity_pairs,
-                margin_mm=args.margin_mm,
-                iterations=args.iterations,
-                grid_mm=args.grid_mm,
-                seed=args.seed,
+                margin_mm=margin_mm,
+                iterations=iterations,
+                grid_mm=grid_mm,
+                seed=seed,
             )
             if args.apply:
                 if args.mode not in {"write", "experimental"}:

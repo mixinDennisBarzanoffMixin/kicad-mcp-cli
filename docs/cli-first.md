@@ -166,8 +166,15 @@ connectivity from the schematic, respects `Edge.Cuts`, lets mechanical anchors
 stay fixed, and accepts absolute rectangular keepouts. The result is ordinary
 JSON suitable for `jq`, review, and diffs.
 
+When the design-intent JSON contains `placement_floorplan`, `--spec` also loads
+its margin, grid, iteration/seed controls, anchors, keepouts, fixed references,
+and hierarchical-sheet cluster regions. Explicit command-line placement options
+override those stored defaults, so a reviewed floorplan is reproducible with one
+short command while experiments remain possible.
+
 ```bash
 kicadq -C ./board place --fix J1 --fix J2 --keepout 0,0,25,12 | jq '.placements'
+kicadq -C ./board place --spec .kicad-mcp/project_spec.json | jq '.quality_gate'
 kicadq -C ./board --mode write place --fix J1 --apply --yes
 ```
 
