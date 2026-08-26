@@ -50,11 +50,32 @@ def test_board_file_helpers_parse_geometry_nets_and_frame() -> None:
     assert footprints["R1"]["net_names"] == ["GND", "VCC"]
     assert footprints["R1"]["pad_nets"] == {"1": "GND", "2": "VCC"}
     assert footprints["R1"]["width_mm"] >= 2.0
+    assert footprints["R1"]["bbox_center_x_mm"] == pytest.approx(0.0)
+    assert footprints["R1"]["bbox_center_y_mm"] == pytest.approx(0.0)
     assert board_file._board_frame_mm(content, footprints) == (-5.0, -4.0, 25.0, 18.0)
     assert board_file._board_frame_mm("(kicad_pcb)", footprints)[0] < 10.0
     assert board_file._board_frame_mm("(kicad_pcb)", {}) == (0.0, 0.0, 100.0, 80.0)
     assert board_file._placement_boxes_overlap(0, 0, 2, 2, 1.9, 0, 2, 2, 0.0)
     assert not board_file._placement_boxes_overlap(0, 0, 2, 2, 5, 0, 2, 2, 0.0)
+
+
+def test_board_file_preserves_asymmetric_footprint_origin_offset() -> None:
+    content = """(kicad_pcb
+      (footprint "Header"
+        (layer "F.Cu")
+        (at 10 20)
+        (property "Reference" "J1")
+        (fp_rect (start -1 -2) (end 5 2)
+          (stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd"))
+      )
+    )"""
+
+    footprint = board_file._parse_board_footprint_blocks(content)["J1"]
+
+    assert footprint["width_mm"] == pytest.approx(6.0)
+    assert footprint["height_mm"] == pytest.approx(4.0)
+    assert footprint["bbox_center_x_mm"] == pytest.approx(2.0)
+    assert footprint["bbox_center_y_mm"] == pytest.approx(0.0)
 
 
 def test_board_block_iterator_handles_large_sparse_content() -> None:

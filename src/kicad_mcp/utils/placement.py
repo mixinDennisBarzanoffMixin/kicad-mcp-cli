@@ -34,6 +34,10 @@ class PlacementComponent:
     w: float = 2.0
     h: float = 2.0
     fixed: bool = False
+    # Offset from the KiCad footprint origin to the center of the physical
+    # bounding box, after applying the footprint's board rotation.
+    origin_dx: float = 0.0
+    origin_dy: float = 0.0
 
 
 @dataclass
@@ -71,6 +75,8 @@ class ForceDirectedConfig:
     # i.e. NOT reproducible — so use it only as a last resort.
     max_seconds: float = 0.0
     keepout_regions: list[tuple[float, float, float, float]] = field(default_factory=list)
+    # Optional per-reference hard placement regions in board-local coordinates.
+    component_regions: dict[str, tuple[float, float, float, float]] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -112,12 +118,16 @@ def _inside_board(
     cfg: ForceDirectedConfig,
 ) -> bool:
     left, top, right, bottom = _component_bounds(x, y, component)
+    region_left, region_top, region_right, region_bottom = cfg.component_regions.get(
+        component.ref,
+        (0.0, 0.0, cfg.board_w, cfg.board_h),
+    )
     epsilon_mm = 1e-6
     return (
-        left >= -epsilon_mm
-        and top >= -epsilon_mm
-        and right <= cfg.board_w + epsilon_mm
-        and bottom <= cfg.board_h + epsilon_mm
+        left >= region_left - epsilon_mm
+        and top >= region_top - epsilon_mm
+        and right <= region_right + epsilon_mm
+        and bottom <= region_bottom + epsilon_mm
     )
 
 
@@ -186,8 +196,18 @@ def _resolve_candidate_position(
                 ):
                     return candidate
 
-    safe_x = min(max(component.w / 2.0, x), cfg.board_w - component.w / 2.0)
-    safe_y = min(max(component.h / 2.0, y), cfg.board_h - component.h / 2.0)
+    region_left, region_top, region_right, region_bottom = cfg.component_regions.get(
+        component.ref,
+        (0.0, 0.0, cfg.board_w, cfg.board_h),
+    )
+    safe_x = min(
+        max(region_left + component.w / 2.0, x),
+        region_right - component.w / 2.0,
+    )
+    safe_y = min(
+        max(region_top + component.h / 2.0, y),
+        region_bottom - component.h / 2.0,
+    )
     return normalize(safe_x, safe_y)
 
 
@@ -281,18 +301,24 @@ def force_directed_placement(
 
         # --- Wall repulsion (soft boundary) ---
         for i, comp in enumerate(comps):
+            region_left, region_top, region_right, region_bottom = cfg.component_regions.get(
+                comp.ref,
+                (0.0, 0.0, cfg.board_w, cfg.board_h),
+            )
             # Left wall
-            if comp.x < comp.w:
-                fx[i] += cfg.k_wall / max(comp.x, 0.01)
+            left_gap = comp.x - region_left
+            if left_gap < comp.w:
+                fx[i] += cfg.k_wall / max(left_gap, 0.01)
             # Right wall
-            right_gap = cfg.board_w - comp.x - comp.w
+            right_gap = region_right - comp.x
             if right_gap < comp.w:
                 fx[i] -= cfg.k_wall / max(right_gap, 0.01)
             # Top wall
-            if comp.y < comp.h:
-                fy[i] += cfg.k_wall / max(comp.y, 0.01)
+            top_gap = comp.y - region_top
+            if top_gap < comp.h:
+                fy[i] += cfg.k_wall / max(top_gap, 0.01)
             # Bottom wall
-            bottom_gap = cfg.board_h - comp.y - comp.h
+            bottom_gap = region_bottom - comp.y
             if bottom_gap < comp.h:
                 fy[i] -= cfg.k_wall / max(bottom_gap, 0.01)
 

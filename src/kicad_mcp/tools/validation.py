@@ -1324,9 +1324,7 @@ def _evaluate_schematic_connectivity_gate() -> GateOutcome:
             if component_contract is None:
                 continue
             group_names = {
-                str(name)
-                for group in relevant_groups
-                for name in cast(list[str], group["names"])
+                str(name) for group in relevant_groups for name in cast(list[str], group["names"])
             }
             missing_groups = [
                 "/".join(options)
@@ -1543,30 +1541,63 @@ def _nearest_edge_distance(
     if entry["x_mm"] is None or entry["y_mm"] is None:
         return None
     min_x, min_y, max_x, max_y = frame
-    x_mm = float(cast(float, entry["x_mm"]))
-    y_mm = float(cast(float, entry["y_mm"]))
-    width_mm, height_mm = _rotated_entry_dimensions(entry)
+    bounds = _entry_bounds(entry)
+    if bounds is None:
+        return None
+    entry_min_x, entry_min_y, entry_max_x, entry_max_y = bounds
     return min(
-        x_mm - (width_mm / 2) - min_x,
-        max_x - (x_mm + (width_mm / 2)),
-        y_mm - (height_mm / 2) - min_y,
-        max_y - (y_mm + (height_mm / 2)),
+        entry_min_x - min_x,
+        max_x - entry_max_x,
+        entry_min_y - min_y,
+        max_y - entry_max_y,
     )
 
 
 def _entry_center(entry: dict[str, object]) -> tuple[float, float] | None:
+    bounds = _entry_bounds(entry)
+    if bounds is None:
+        return None
+    min_x, min_y, max_x, max_y = bounds
+    return (min_x + max_x) / 2.0, (min_y + max_y) / 2.0
+
+
+def _entry_bounds(
+    entry: dict[str, object],
+) -> tuple[float, float, float, float] | None:
+    """Return the rotated physical bounds around KiCad's asymmetric origin."""
     if entry["x_mm"] is None or entry["y_mm"] is None:
         return None
-    return float(cast(float, entry["x_mm"])), float(cast(float, entry["y_mm"]))
+    origin_x = float(cast(float, entry["x_mm"]))
+    origin_y = float(cast(float, entry["y_mm"]))
+    width_mm = float(cast(float, entry["width_mm"]))
+    height_mm = float(cast(float, entry["height_mm"]))
+    local_min_x = float(entry.get("bbox_min_x_mm", -width_mm / 2.0))
+    local_min_y = float(entry.get("bbox_min_y_mm", -height_mm / 2.0))
+    local_max_x = float(entry.get("bbox_max_x_mm", width_mm / 2.0))
+    local_max_y = float(entry.get("bbox_max_y_mm", height_mm / 2.0))
+    angle = math.radians(float(cast(float, entry.get("rotation", 0) or 0)))
+    cosine = math.cos(angle)
+    sine = math.sin(angle)
+    corners = [
+        (local_min_x, local_min_y),
+        (local_min_x, local_max_y),
+        (local_max_x, local_min_y),
+        (local_max_x, local_max_y),
+    ]
+    rotated = [
+        (origin_x + x * cosine + y * sine, origin_y - x * sine + y * cosine) for x, y in corners
+    ]
+    xs = [point[0] for point in rotated]
+    ys = [point[1] for point in rotated]
+    return min(xs), min(ys), max(xs), max(ys)
 
 
 def _rotated_entry_dimensions(entry: dict[str, object]) -> tuple[float, float]:
-    width_mm = float(cast(float, entry["width_mm"]))
-    height_mm = float(cast(float, entry["height_mm"]))
-    rotation = int(round(float(cast(float, entry.get("rotation", 0) or 0)))) % 180
-    if rotation == 90:
-        return height_mm, width_mm
-    return width_mm, height_mm
+    bounds = _entry_bounds(entry)
+    if bounds is None:
+        return float(cast(float, entry["width_mm"])), float(cast(float, entry["height_mm"]))
+    min_x, min_y, max_x, max_y = bounds
+    return max_x - min_x, max_y - min_y
 
 
 def _bbox_gap_mm(left_entry: dict[str, object], right_entry: dict[str, object]) -> float | None:
@@ -1700,26 +1731,32 @@ def _placement_analysis() -> tuple[PlacementAnalysis | None, GateOutcome | None]
     for index, (left_ref, left_entry) in enumerate(items):
         if left_entry["x_mm"] is None or left_entry["y_mm"] is None:
             continue
-        left_x = float(left_entry["x_mm"])
-        left_y = float(left_entry["y_mm"])
+        left_center = _entry_center(left_entry)
+        if left_center is None:
+            continue
+        left_x, left_y = left_center
         left_w, left_h = _rotated_entry_dimensions(left_entry)
-        if (
-            left_x - (left_w / 2) < min_x
-            or left_x + (left_w / 2) > max_x
-            or left_y - (left_h / 2) < min_y
-            or left_y + (left_h / 2) > max_y
+        left_bounds = _entry_bounds(left_entry)
+        if left_bounds is not None and (
+            left_bounds[0] < min_x
+            or left_bounds[2] > max_x
+            or left_bounds[1] < min_y
+            or left_bounds[3] > max_y
         ):
             outside.append(left_ref)
         for right_ref, right_entry in items[index + 1 :]:
             if right_entry["x_mm"] is None or right_entry["y_mm"] is None:
+                continue
+            right_center = _entry_center(right_entry)
+            if right_center is None:
                 continue
             if _placement_boxes_overlap(
                 left_x,
                 left_y,
                 left_w,
                 left_h,
-                float(right_entry["x_mm"]),
-                float(right_entry["y_mm"]),
+                right_center[0],
+                right_center[1],
                 *_rotated_entry_dimensions(right_entry),
                 0.0,
             ):

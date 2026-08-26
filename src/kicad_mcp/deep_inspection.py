@@ -319,8 +319,10 @@ def _pad_positions(footprint: JsonRecord) -> list[JsonRecord]:
             continue
         local_x = float(at.group(1)) * (-1 if back else 1)
         local_y = float(at.group(2))
-        global_x = root_x + local_x * math.cos(root_rotation) - local_y * math.sin(root_rotation)
-        global_y = root_y + local_x * math.sin(root_rotation) + local_y * math.cos(root_rotation)
+        # KiCad board coordinates have +Y downward. At +90 degrees local +Y
+        # becomes board +X, while local +X becomes board -Y.
+        global_x = root_x + local_x * math.cos(root_rotation) + local_y * math.sin(root_rotation)
+        global_y = root_y - local_x * math.sin(root_rotation) + local_y * math.cos(root_rotation)
         pads.append(
             {
                 "number": number.group(1),
@@ -562,6 +564,7 @@ def connectivity_proof(
     missing_footprints = sorted(
         item["reference"] for item in components if not item.get("footprint")
     )
+
     def comparable_net_name(name: object) -> str:
         # KiCad serializes '/' inside auto-generated unconnected net names as
         # the literal token ``{slash}`` when a pin function contains a slash.
@@ -1273,6 +1276,7 @@ def placement_plan(
     *,
     fixed_references: Iterable[str] = (),
     anchors: Iterable[JsonRecord] = (),
+    cluster_regions: Iterable[JsonRecord] = (),
     keepout_regions: Iterable[list[float]] = (),
     margin_mm: float = 3.0,
     iterations: int = 300,
@@ -1301,8 +1305,7 @@ def placement_plan(
     anchor_by_ref = {str(anchor["reference"]): anchor for anchor in anchor_list}
     fixed = set(fixed_references) | set(anchor_by_ref)
     rotation_by_ref = {
-        str(item["reference"]): float(item.get("rotation", 0.0) or 0.0)
-        for item in footprints
+        str(item["reference"]): float(item.get("rotation", 0.0) or 0.0) for item in footprints
     }
     for reference, anchor in anchor_by_ref.items():
         if reference not in rotation_by_ref:
@@ -1313,28 +1316,55 @@ def placement_plan(
             }
         if anchor.get("rotation") is not None:
             rotation_by_ref[reference] = float(anchor["rotation"])
-    components = [
-        PlacementComponent(
-            ref=str(item["reference"]),
-            x=float(item["x_mm"]) - left,
-            y=float(item["y_mm"]) - top,
-            w=(
-                float(item["height_mm"])
-                if int(round(rotation_by_ref[str(item["reference"])])) % 180 == 90
-                else float(item["width_mm"])
-            )
-            + margin_mm,
-            h=(
-                float(item["width_mm"])
-                if int(round(rotation_by_ref[str(item["reference"])])) % 180 == 90
-                else float(item["height_mm"])
-            )
-            + margin_mm,
-            fixed=str(item["reference"]) in fixed,
+
+    def rotated_geometry(
+        item: JsonRecord, rotation_deg: float
+    ) -> tuple[float, float, float, float]:
+        min_x = float(item.get("bbox_min_x_mm", -float(item["width_mm"]) / 2.0))
+        min_y = float(item.get("bbox_min_y_mm", -float(item["height_mm"]) / 2.0))
+        max_x = float(item.get("bbox_max_x_mm", float(item["width_mm"]) / 2.0))
+        max_y = float(item.get("bbox_max_y_mm", float(item["height_mm"]) / 2.0))
+        angle = math.radians(rotation_deg)
+        cosine = math.cos(angle)
+        sine = math.sin(angle)
+        corners = [
+            (min_x, min_y),
+            (min_x, max_y),
+            (max_x, min_y),
+            (max_x, max_y),
+        ]
+        rotated = [(x * cosine + y * sine, -x * sine + y * cosine) for x, y in corners]
+        xs = [point[0] for point in rotated]
+        ys = [point[1] for point in rotated]
+        rotated_min_x, rotated_max_x = min(xs), max(xs)
+        rotated_min_y, rotated_max_y = min(ys), max(ys)
+        return (
+            (rotated_min_x + rotated_max_x) / 2.0,
+            (rotated_min_y + rotated_max_y) / 2.0,
+            rotated_max_x - rotated_min_x,
+            rotated_max_y - rotated_min_y,
         )
-        for item in footprints
-        if item.get("x_mm") is not None and item.get("y_mm") is not None
-    ]
+
+    components: list[PlacementComponent] = []
+    for item in footprints:
+        if item.get("x_mm") is None or item.get("y_mm") is None:
+            continue
+        reference = str(item["reference"])
+        origin_dx, origin_dy, geometry_width, geometry_height = rotated_geometry(
+            item, rotation_by_ref[reference]
+        )
+        components.append(
+            PlacementComponent(
+                ref=reference,
+                x=float(item["x_mm"]) - left + origin_dx,
+                y=float(item["y_mm"]) - top + origin_dy,
+                w=geometry_width + margin_mm,
+                h=geometry_height + margin_mm,
+                fixed=reference in fixed,
+                origin_dx=origin_dx,
+                origin_dy=origin_dy,
+            )
+        )
     saved_components = [PlacementComponent(**component.__dict__) for component in components]
     components_by_ref = {component.ref: component for component in components}
     resolved_anchors: list[JsonRecord] = []
@@ -1350,8 +1380,8 @@ def placement_plan(
         if anchor.get("x_mm") is not None and anchor.get("y_mm") is not None:
             edge = "absolute"
             offset: float | None = None
-            component.x = float(anchor["x_mm"]) - left
-            component.y = float(anchor["y_mm"]) - top
+            component.x = float(anchor["x_mm"]) - left + component.origin_dx
+            component.y = float(anchor["y_mm"]) - top + component.origin_dy
             if (
                 component.x - (component.w / 2.0) < 0.0
                 or component.x + (component.w / 2.0) > width
@@ -1398,9 +1428,74 @@ def placement_plan(
                 "edge": edge,
                 "offset_mm": offset,
                 "rotation": rotation_by_ref[reference],
-                "position_mm": [round(component.x + left, 4), round(component.y + top, 4)],
+                "position_mm": [
+                    round(component.x - component.origin_dx + left, 4),
+                    round(component.y - component.origin_dy + top, 4),
+                ],
             }
         )
+    anchored_components = [PlacementComponent(**component.__dict__) for component in components]
+    sheet_by_ref = {
+        str(item["reference"]): str(item.get("sheet", ""))
+        for item in snapshot["schematic"].get("components", [])
+    }
+    component_regions: dict[str, tuple[float, float, float, float]] = {}
+    resolved_clusters: list[JsonRecord] = []
+    for cluster in cluster_regions:
+        sheet = str(cluster["sheet"])
+        x1 = float(cluster["x1_mm"])
+        y1 = float(cluster["y1_mm"])
+        x2 = float(cluster["x2_mm"])
+        y2 = float(cluster["y2_mm"])
+        if not (left <= x1 < x2 <= right and top <= y1 < y2 <= bottom):
+            return {
+                "status": "blocked",
+                "reason": f"cluster region for '{sheet}' is outside the board",
+                "placements": [],
+            }
+        local_region = (x1 - left, y1 - top, x2 - left, y2 - top)
+        references = sorted(
+            reference
+            for reference, reference_sheet in sheet_by_ref.items()
+            if reference_sheet == sheet and reference in components_by_ref
+        )
+        for reference in references:
+            if reference not in fixed:
+                component_regions[reference] = local_region
+        resolved_clusters.append(
+            {
+                "sheet": sheet,
+                "bounds_mm": [x1, y1, x2, y2],
+                "references": references,
+                "movable_references": [
+                    reference for reference in references if reference not in fixed
+                ],
+            }
+        )
+
+    # Seed movable cluster members on a deterministic region grid. The force
+    # solver and legalizer refine this seed but cannot leak members into another
+    # subsystem's physical region.
+    members_by_region: dict[tuple[float, float, float, float], list[PlacementComponent]] = {}
+    for component in components:
+        region = component_regions.get(component.ref)
+        if region is not None:
+            members_by_region.setdefault(region, []).append(component)
+    for region, members in members_by_region.items():
+        region_left, region_top, region_right, region_bottom = region
+        region_width = region_right - region_left
+        region_height = region_bottom - region_top
+        ordered_members = sorted(members, key=lambda item: (-(item.w * item.h), item.ref))
+        columns = max(
+            1,
+            math.ceil(math.sqrt(len(ordered_members) * region_width / region_height)),
+        )
+        rows = max(1, math.ceil(len(ordered_members) / columns))
+        for index, component in enumerate(ordered_members):
+            column = index % columns
+            row = index // columns
+            component.x = region_left + ((column + 0.5) * region_width / columns)
+            component.y = region_top + ((row + 0.5) * region_height / rows)
     known_refs = {component.ref for component in components}
     nets: list[PlacementNet] = []
     for net in snapshot["schematic"]["nets"]:
@@ -1421,28 +1516,24 @@ def placement_plan(
         for region in keepout_regions
     ]
     stats: dict[str, object] = {}
+    placement_config = ForceDirectedConfig(
+        iterations=iterations,
+        board_w=width,
+        board_h=height,
+        seed=seed,
+        grid_mm=grid_mm,
+        keepout_regions=local_keepouts,
+        component_regions=component_regions,
+    )
     proposed = force_directed_placement(
         components,
         nets,
-        ForceDirectedConfig(
-            iterations=iterations,
-            board_w=width,
-            board_h=height,
-            seed=seed,
-            grid_mm=grid_mm,
-            keepout_regions=local_keepouts,
-        ),
+        placement_config,
         stats=stats,
     )
     proposed = legalize_placement(
         proposed,
-        ForceDirectedConfig(
-            board_w=width,
-            board_h=height,
-            seed=seed,
-            grid_mm=grid_mm,
-            keepout_regions=local_keepouts,
-        ),
+        placement_config,
         stats=stats,
     )
     original = {component.ref: component for component in saved_components}
@@ -1450,10 +1541,19 @@ def placement_plan(
         {
             "reference": component.ref,
             "from": [
-                round(original[component.ref].x + left, 4),
-                round(original[component.ref].y + top, 4),
+                round(
+                    original[component.ref].x - original[component.ref].origin_dx + left,
+                    4,
+                ),
+                round(
+                    original[component.ref].y - original[component.ref].origin_dy + top,
+                    4,
+                ),
             ],
-            "to": [round(component.x + left, 4), round(component.y + top, 4)],
+            "to": [
+                round(component.x - component.origin_dx + left, 4),
+                round(component.y - component.origin_dy + top, 4),
+            ],
             "fixed": component.fixed,
             "anchored": component.ref in anchor_by_ref,
             "from_rotation": next(
@@ -1479,12 +1579,29 @@ def placement_plan(
         return total
 
     hpwl_before = weighted_hpwl(saved_components)
+    baseline_stats: dict[str, object] = {}
+    legalized_baseline = legalize_placement(
+        anchored_components,
+        ForceDirectedConfig(
+            board_w=width,
+            board_h=height,
+            seed=seed,
+            grid_mm=grid_mm,
+            keepout_regions=local_keepouts,
+        ),
+        stats=baseline_stats,
+    )
+    hpwl_baseline = weighted_hpwl(legalized_baseline)
     hpwl_after = weighted_hpwl(proposed)
-    hpwl_delta_pct = (
+    hpwl_original_delta_pct = (
         ((hpwl_after - hpwl_before) / hpwl_before) * 100.0 if hpwl_before > 0.0 else 0.0
     )
+    hpwl_delta_pct = (
+        ((hpwl_after - hpwl_baseline) / hpwl_baseline) * 100.0 if hpwl_baseline > 0.0 else 0.0
+    )
     unresolved = list(stats.get("legalized_unresolved", []))
-    quality_pass = hpwl_delta_pct <= 25.0 and not unresolved
+    baseline_unresolved = list(baseline_stats.get("legalized_unresolved", []))
+    quality_pass = hpwl_delta_pct <= 25.0 and not unresolved and not baseline_unresolved
     return {
         "status": "planned",
         "board_bounds_mm": list(bounds),
@@ -1498,9 +1615,14 @@ def placement_plan(
         "legalized_moved": stats.get("legalized_moved"),
         "legalized_unresolved": unresolved,
         "anchors": resolved_anchors,
+        "clusters": resolved_clusters,
+        "clustered_references": len(component_regions),
         "weighted_hpwl_before_mm": round(hpwl_before, 3),
+        "weighted_hpwl_legalized_baseline_mm": round(hpwl_baseline, 3),
         "weighted_hpwl_after_mm": round(hpwl_after, 3),
         "wirelength_delta_pct": round(hpwl_delta_pct, 2),
+        "wirelength_vs_original_delta_pct": round(hpwl_original_delta_pct, 2),
+        "baseline_legalized_unresolved": baseline_unresolved,
         "quality_gate": {
             "status": "pass" if quality_pass else "fail",
             "max_wirelength_increase_pct": 25.0,
@@ -1508,10 +1630,17 @@ def placement_plan(
                 "weighted HPWL is within the allowed regression threshold"
                 if quality_pass
                 else (
-                    "placement legalization left unresolved footprints: "
-                    + ", ".join(unresolved)
+                    "placement legalization left unresolved footprints: " + ", ".join(unresolved)
                     if unresolved
-                    else "weighted HPWL would regress by more than 25%"
+                    else (
+                        "legalized comparison baseline left unresolved footprints: "
+                        + ", ".join(baseline_unresolved)
+                        if baseline_unresolved
+                        else (
+                            "weighted HPWL would regress by more than 25% versus "
+                            "the legalized baseline"
+                        )
+                    )
                 )
             ),
         },

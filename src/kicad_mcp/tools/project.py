@@ -907,6 +907,16 @@ def _critical_nets_from_entries(entries: dict[str, dict[str, Any]]) -> list[str]
 def _component_category(reference: str, entry: dict[str, Any]) -> str:
     footprint_name = str(entry.get("name", "")).strip()
     value_name = str(entry.get("value", "")).strip()
+    upper_ref = reference.upper()
+    # Reference designators are stronger evidence than broad footprint-contract
+    # matches.  A resistor must never become a regulator/IC candidate merely
+    # because a fuzzy library lookup matched part of its footprint name.
+    if upper_ref.startswith("C"):
+        return "capacitor"
+    if re.fullmatch(r"J\d+", upper_ref):
+        return "connector"
+    if upper_ref.startswith("R"):
+        return ""
     contract = find_component_contract(footprint=footprint_name)
     if contract is not None:
         category = contract.category
@@ -923,14 +933,9 @@ def _component_category(reference: str, entry: dict[str, Any]) -> str:
         if category in {"memory", "interface"}:
             return "digital"
 
-    upper_ref = reference.upper()
     upper_name = footprint_name.upper()
     upper_value = value_name.upper()
-    if (
-        re.fullmatch(r"J\d+", upper_ref)
-        or "CONNECTOR" in upper_name
-        or "USB" in upper_name
-    ):
+    if re.fullmatch(r"J\d+", upper_ref) or "CONNECTOR" in upper_name or "USB" in upper_name:
         return "connector"
     if upper_ref.startswith("C") or "CAPACITOR" in upper_name:
         return "capacitor"

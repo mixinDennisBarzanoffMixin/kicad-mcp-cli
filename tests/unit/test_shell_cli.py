@@ -7,6 +7,7 @@ import copy
 import json
 from pathlib import Path
 
+import pytest
 from kipy.geometry import Angle, Vector2
 from mcp import types as mcp_types
 
@@ -20,12 +21,16 @@ from kicad_mcp.deep_inspection import (
     route_plan,
 )
 from kicad_mcp.shell_cli import (
+    _apply_footprint_batch_to_board_content,
     _emit_records,
     _erc_finding_keys,
     _native_move_footprints_batch,
+    _placement_batch_requires_guarded_file,
     _resolve_edit_schematic,
     _rewire_tool_calls,
     _schematic_manifest,
+    _verify_rigid_footprint_children,
+    _verify_staged_footprint_batch,
     file_records,
     parse_call_arguments,
     result_envelope,
@@ -60,17 +65,116 @@ def test_native_move_footprints_batch_updates_once_and_preserves_rotation() -> N
     board = Board()
     result = _native_move_footprints_batch(
         board,
-        {
-            "placements": [
-                {"reference": "U1", "x_mm": 10.0, "y_mm": 12.0, "rotation_deg": 90.0}
-            ]
-        },
+        {"placements": [{"reference": "U1", "x_mm": 10.0, "y_mm": 12.0, "rotation_deg": 90.0}]},
     )
 
     assert result["ok"] is True
     assert result["result"] == {"moved": 1}
     assert board.updates == 1
     assert footprint.position == Vector2.from_xy_mm(10.0, 12.0)
+
+
+def test_native_move_footprints_batch_rejects_non_rigid_rotation_change() -> None:
+    class Text:
+        value = "U1"
+
+    class Reference:
+        text = Text()
+
+    class Footprint:
+        reference_field = Reference()
+        position = Vector2.from_xy_mm(1.0, 2.0)
+        orientation = Angle.from_degrees(0.0)
+
+    class Board:
+        def get_footprints(self) -> list[object]:
+            return [Footprint()]
+
+        def update_items(self, _items: list[object]) -> None:
+            raise AssertionError("rotation-changing batch must not update the board")
+
+    result = _native_move_footprints_batch(
+        Board(),
+        {"placements": [{"reference": "U1", "x_mm": 10, "y_mm": 12, "rotation_deg": 90}]},
+    )
+
+    assert result["ok"] is False
+    assert "not a rigid child transform" in str(result["error"])
+
+
+def test_staged_footprint_batch_verifies_serialized_position_and_rotation() -> None:
+    content = """(kicad_pcb
+      (footprint "Test"
+        (layer "F.Cu")
+        (at 10 12 90)
+        (property "Reference" "U1" (at 0 0 0) (layer "F.SilkS"))
+        (fp_rect (start -1 -1) (end 1 1) (stroke (width 0.05) (type solid))
+          (fill no) (layer "F.CrtYd"))
+      )
+    )"""
+
+    _verify_staged_footprint_batch(
+        content,
+        {"placements": [{"reference": "U1", "x_mm": 10, "y_mm": 12, "rotation_deg": 90}]},
+    )
+
+
+def test_offline_footprint_batch_changes_only_requested_root_transform() -> None:
+    content = """(kicad_pcb
+      (footprint "Test"
+        (layer "F.Cu")
+        (at 1 2 0)
+        (property "Reference" "U1" (at 0 0 0) (layer "F.SilkS"))
+        (fp_rect (start -1 -1) (end 1 1) (stroke (width 0.05) (type solid))
+          (fill no) (layer "F.CrtYd"))
+      )
+    )"""
+
+    candidate = _apply_footprint_batch_to_board_content(
+        content,
+        {"placements": [{"reference": "U1", "x_mm": 10, "y_mm": 12, "rotation_deg": 90}]},
+    )
+
+    assert "(at 10.0000 12.0000 90.0000)" in candidate
+    assert '(property "Reference" "U1" (at 0 0 0)' in candidate
+
+
+def test_rigid_footprint_verification_rejects_embedded_zone_drift() -> None:
+    expected = """(kicad_pcb
+      (footprint "RF_Module"
+        (layer "F.Cu")
+        (at 10 12 0)
+        (property "Reference" "U1" (at 0 0 0) (layer "F.SilkS"))
+        (zone (layers "F.Cu") (polygon (pts (xy -2 -4) (xy 2 -4))))
+      )
+    )"""
+    observed = expected.replace("(at 10 12 0)", "(at 20 22 0)").replace("(xy -2 -4)", "(xy 8 6)")
+
+    with pytest.raises(RuntimeError, match="changed child geometry"):
+        _verify_rigid_footprint_children(
+            expected,
+            observed,
+            {"placements": [{"reference": "U1", "x_mm": 20, "y_mm": 22}]},
+        )
+
+
+def test_embedded_zone_placement_selects_guarded_file_transaction() -> None:
+    board = """(kicad_pcb
+      (footprint "RF_Module"
+        (layer "F.Cu")
+        (at 10 12)
+        (property "Reference" "U1")
+        (zone (layers "F.Cu") (polygon (pts (xy -2 -4) (xy 2 -4))))
+      )
+    )"""
+    operations = [
+        (
+            "_native_move_footprints_batch",
+            {"placements": [{"reference": "U1", "x_mm": 20, "y_mm": 22}]},
+        )
+    ]
+
+    assert _placement_batch_requires_guarded_file(board, operations) is True
 
 
 def test_names_output_uses_paths_for_file_manifest_records(capsys) -> None:
@@ -308,7 +412,7 @@ async def test_native_placement_transaction_accepts_strict_drc_improvement(
     commit = object()
 
     class FakeBoard:
-        contents = iter(["before", "staged"])
+        contents = iter(["before", "committed"])
 
         def get_as_string(self) -> str:
             return next(self.contents)
@@ -335,11 +439,22 @@ async def test_native_placement_transaction_accepts_strict_drc_improvement(
         lambda _root: {"policy": {"board_mutation_allowed": True}},
     )
     monkeypatch.setattr(shell_cli, "get_board", FakeBoard)
-
-    async def invoke(_args, _tool, _arguments):
-        return {"ok": True, "tool": "pcb_move_footprint"}
-
-    monkeypatch.setattr(shell_cli, "invoke_backend_tool", invoke)
+    monkeypatch.setattr(
+        shell_cli,
+        "_native_move_footprints_batch",
+        lambda _board, _arguments: {
+            "ok": True,
+            "tool": "_native_move_footprints_batch",
+            "result": {"moved": 1},
+        },
+    )
+    monkeypatch.setattr(
+        shell_cli,
+        "_apply_footprint_batch_to_board_content",
+        lambda _content, _arguments: "candidate",
+    )
+    monkeypatch.setattr(shell_cli, "_verify_staged_footprint_batch", lambda *_args: None)
+    monkeypatch.setattr(shell_cli, "_verify_rigid_footprint_children", lambda *_args: None)
     drc_results = iter(
         [
             {
@@ -348,7 +463,7 @@ async def test_native_placement_transaction_accepts_strict_drc_improvement(
             },
             {
                 "finding_keys": ['{"kind":"new-a"}'],
-                "summary": {"violations": 1, "unconnected_items": 1},
+                "summary": {"violations": 1, "unconnected_items": 2},
             },
         ]
     )
@@ -366,12 +481,19 @@ async def test_native_placement_transaction_accepts_strict_drc_improvement(
 
     report = await run_native_board_transaction(
         args,
-        [("pcb_move_footprint", {"reference": "U1", "x_mm": 1, "y_mm": 2})],
+        [
+            (
+                "_native_move_footprints_batch",
+                {"placements": [{"reference": "U1", "x_mm": 1, "y_mm": 2, "rotation_deg": 0}]},
+            )
+        ],
         label="placement",
     )
 
     assert report["status"] == "pass"
     assert report["accepted_placement_improvement"] is True
+    assert report["before_physical_violations"] == 2
+    assert report["staged_physical_violations"] == 1
     assert effects == ["begin", "push", "save"]
 
 
@@ -452,6 +574,26 @@ def test_deep_filter_and_ascii_zoom() -> None:
     assert "PCB MAP" in ascii_map(snapshot, zoom=3)
 
 
+def test_pad_rotation_uses_kicad_board_coordinate_direction() -> None:
+    from kicad_mcp.deep_inspection import _pad_positions
+
+    footprint = {
+        "x_mm": 60.0,
+        "y_mm": 116.5,
+        "rotation": 90.0,
+        "layer_name": "F.Cu",
+        "block": """(footprint "Header"
+          (at 60 116.5 90)
+          (property "Reference" "J10")
+          (pad "18" thru_hole circle (at 2.54 20.32) (size 1.7 1.7)
+            (drill 1) (layers "*.Cu") (net 1 "AMP_SD")))""",
+    }
+
+    pad = _pad_positions(footprint)[0]
+
+    assert pad["at"] == [80.32, 113.96]
+
+
 def test_connectivity_proof_expands_pin_net_and_peer_evidence() -> None:
     proof = connectivity_proof(_snapshot(), reference="U1")
 
@@ -506,9 +648,7 @@ def test_connectivity_proof_accepts_kicad_slash_token_in_unconnected_net() -> No
             ],
         }
     ]
-    snapshot["board"]["footprints"][0]["pads"][0]["net"] = (
-        "unconnected-(U1-A{slash}B-Pad1)"
-    )
+    snapshot["board"]["footprints"][0]["pads"][0]["net"] = "unconnected-(U1-A{slash}B-Pad1)"
 
     proof = connectivity_proof(snapshot, reference="U1")
 
@@ -631,6 +771,51 @@ def test_placement_plan_resolves_absolute_anchor() -> None:
     assert anchor["edge"] == "absolute"
     assert anchor["position_mm"] == [8.0, 4.0]
     assert u1["to"] == [8.0, 4.0]
+
+
+def test_placement_plan_edge_anchor_accounts_for_asymmetric_origin() -> None:
+    snapshot = _snapshot()
+    footprint = snapshot["board"]["footprints"][0]
+    footprint.update(
+        {
+            "bbox_min_x_mm": -1.0,
+            "bbox_max_x_mm": 5.0,
+            "bbox_min_y_mm": -2.0,
+            "bbox_max_y_mm": 2.0,
+            "width_mm": 6.0,
+            "height_mm": 4.0,
+        }
+    )
+
+    plan = placement_plan(
+        snapshot,
+        anchors=[{"reference": "U1", "edge": "right", "offset_mm": 5}],
+        iterations=5,
+        margin_mm=0,
+    )
+
+    anchor = plan["anchors"][0]
+    assert anchor["position_mm"] == [15.0, 5.0]
+    assert next(item for item in plan["placements"] if item["reference"] == "U1")["to"] == [
+        15.0,
+        5.0,
+    ]
+
+
+def test_placement_plan_constrains_hierarchical_sheet_to_cluster_region() -> None:
+    plan = placement_plan(
+        _snapshot(),
+        cluster_regions=[{"sheet": "/Power/", "x1_mm": 0, "y1_mm": 0, "x2_mm": 10, "y2_mm": 10}],
+        iterations=10,
+        margin_mm=0,
+    )
+
+    assert plan["clustered_references"] == 2
+    assert plan["clusters"][0]["sheet"] == "/Power/"
+    assert all(
+        0 <= coordinate <= 10 for placement in plan["placements"] for coordinate in placement["to"]
+    )
+    assert plan["weighted_hpwl_legalized_baseline_mm"] >= 0.0
 
 
 def test_shell_source_does_not_use_shell_execution() -> None:

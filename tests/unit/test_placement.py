@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 from kicad_mcp.tools.pcb import _placement_net_weight, _placement_nets_from_footprints
-from kicad_mcp.tools.validation import PlacementAnalysis, _format_placement_score
+from kicad_mcp.tools.project import _component_category
+from kicad_mcp.tools.validation import (
+    PlacementAnalysis,
+    _entry_bounds,
+    _entry_center,
+    _format_placement_score,
+)
 from kicad_mcp.utils.placement import (
     BGABall,
     ForceDirectedConfig,
@@ -38,6 +44,31 @@ def test_force_directed_placement_is_deterministic_and_snaps_to_grid() -> None:
     ]
     assert all(item.x == round(item.x) for item in first)
     assert all(item.y == round(item.y) for item in first)
+
+
+def test_validation_geometry_respects_asymmetric_origin_and_kicad_rotation() -> None:
+    entry: dict[str, object] = {
+        "x_mm": 60.0,
+        "y_mm": 116.5,
+        "rotation": 90.0,
+        "width_mm": 6.09,
+        "height_mm": 23.86,
+        "bbox_min_x_mm": -1.77,
+        "bbox_min_y_mm": -1.77,
+        "bbox_max_x_mm": 4.32,
+        "bbox_max_y_mm": 22.09,
+    }
+
+    bounds = _entry_bounds(entry)
+
+    assert bounds is not None
+    assert tuple(round(value, 2) for value in bounds) == (58.23, 112.18, 82.09, 118.27)
+    assert tuple(round(value, 3) for value in _entry_center(entry) or ()) == (70.16, 115.225)
+
+
+def test_component_category_never_promotes_passive_reference_to_ic() -> None:
+    assert _component_category("R47", {"name": "R_0603", "value": "100k"}) == ""
+    assert _component_category("C22", {"name": "C_0805", "value": "22uF"}) == "capacitor"
 
 
 def test_force_directed_placement_converges_before_iteration_ceiling() -> None:
@@ -127,6 +158,28 @@ def test_force_directed_placement_respects_keepout_regions() -> None:
     )
 
 
+def test_force_directed_placement_respects_per_component_regions() -> None:
+    components = [
+        PlacementComponent(ref="U1", x=18.0, y=10.0, w=2.0, h=2.0),
+        PlacementComponent(ref="U2", x=2.0, y=10.0, w=2.0, h=2.0),
+    ]
+    cfg = ForceDirectedConfig(
+        iterations=20,
+        board_w=20.0,
+        board_h=20.0,
+        grid_mm=0.5,
+        component_regions={
+            "U1": (0.0, 0.0, 10.0, 20.0),
+            "U2": (10.0, 0.0, 20.0, 20.0),
+        },
+    )
+
+    placed = {item.ref: item for item in force_directed_placement(components, [], cfg)}
+
+    assert 1.0 <= placed["U1"].x <= 9.0
+    assert 11.0 <= placed["U2"].x <= 19.0
+
+
 def test_legalize_placement_removes_overlaps_and_preserves_fixed_anchor() -> None:
     components = [
         PlacementComponent("J1", 2.0, 2.0, w=2.0, h=2.0, fixed=True),
@@ -146,9 +199,10 @@ def test_legalize_placement_removes_overlaps_and_preserves_fixed_anchor() -> Non
     assert stats["legalized_unresolved"] == []
     for index, component in enumerate(placed):
         for other in placed[index + 1 :]:
-            assert abs(component.x - other.x) >= (component.w + other.w) / 2 or abs(
-                component.y - other.y
-            ) >= (component.h + other.h) / 2
+            assert (
+                abs(component.x - other.x) >= (component.w + other.w) / 2
+                or abs(component.y - other.y) >= (component.h + other.h) / 2
+            )
 
 
 def test_legalize_placement_does_not_snap_fixed_anchor_to_grid() -> None:

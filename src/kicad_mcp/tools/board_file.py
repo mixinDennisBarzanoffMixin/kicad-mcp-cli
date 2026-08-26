@@ -64,7 +64,14 @@ def _iter_blocks(content: str, keyword: str) -> Iterable[str]:
             cursor = start + len(marker)
 
 
-def _bbox_from_block(block: str) -> tuple[float, float]:
+def _bbox_extents_from_block(block: str) -> tuple[float, float, float, float]:
+    """Return local footprint geometry as ``min_x, min_y, max_x, max_y``.
+
+    KiCad footprint origins are not necessarily at the geometric center.  Keeping
+    the extents, rather than only width and height, is required for correct edge
+    anchoring and collision checks.  Pad rotation is included because an oblong
+    pad can otherwise understate one axis of the physical footprint.
+    """
     xs: list[float] = []
     ys: list[float] = []
 
@@ -96,7 +103,7 @@ def _bbox_from_block(block: str) -> tuple[float, float]:
 
     for pad_block in _iter_blocks(block, "pad"):
         at_match = re.search(
-            rf"\(at\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})(?:\s+{FLOAT_PATTERN})?\)",
+            rf"\(at\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})(?:\s+({FLOAT_PATTERN}))?\)",
             pad_block,
         )
         size_match = re.search(rf"\(size\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})\)", pad_block)
@@ -105,14 +112,29 @@ def _bbox_from_block(block: str) -> tuple[float, float]:
             center_y = float(at_match.group(2))
             width = float(size_match.group(1))
             height = float(size_match.group(2))
-            xs.extend([center_x - (width / 2), center_x + (width / 2)])
-            ys.extend([center_y - (height / 2), center_y + (height / 2)])
+            angle = math.radians(float(at_match.group(3) or 0.0))
+            half_width = width / 2.0
+            half_height = height / 2.0
+            rotated_half_width = abs(half_width * math.cos(angle)) + abs(
+                half_height * math.sin(angle)
+            )
+            rotated_half_height = abs(half_width * math.sin(angle)) + abs(
+                half_height * math.cos(angle)
+            )
+            xs.extend([center_x - rotated_half_width, center_x + rotated_half_width])
+            ys.extend([center_y - rotated_half_height, center_y + rotated_half_height])
 
     if not xs or not ys:
-        return 5.08, 5.08
+        return -2.54, -2.54, 2.54, 2.54
 
-    width = max(max(xs) - min(xs), 1.0)
-    height = max(max(ys) - min(ys), 1.0)
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _bbox_from_block(block: str) -> tuple[float, float]:
+    min_x, min_y, max_x, max_y = _bbox_extents_from_block(block)
+
+    width = max(max_x - min_x, 1.0)
+    height = max(max_y - min_y, 1.0)
     return round(width, 4), round(height, 4)
 
 
@@ -152,7 +174,9 @@ def _parse_board_footprint_blocks(content: str) -> dict[str, dict[str, Any]]:
                     name_match = re.match(rf"\(footprint\s+{STRING_PATTERN}", block.lstrip())
                     if ref_match and name_match:
                         root_at = _parse_root_at(block)
-                        width_mm, height_mm = _bbox_from_block(block)
+                        min_x, min_y, max_x, max_y = _bbox_extents_from_block(block)
+                        width_mm = max(max_x - min_x, 1.0)
+                        height_mm = max(max_y - min_y, 1.0)
                         layer_match = re.search(r'\(layer\s+"([^"]+)"\)', block)
                         footprints[ref_match.group(1)] = {
                             "name": name_match.group(1),
@@ -163,8 +187,14 @@ def _parse_board_footprint_blocks(content: str) -> dict[str, dict[str, Any]]:
                             "x_mm": root_at[0] if root_at else None,
                             "y_mm": root_at[1] if root_at else None,
                             "rotation": root_at[2] if root_at else 0,
-                            "width_mm": width_mm,
-                            "height_mm": height_mm,
+                            "width_mm": round(width_mm, 4),
+                            "height_mm": round(height_mm, 4),
+                            "bbox_min_x_mm": round(min_x, 4),
+                            "bbox_min_y_mm": round(min_y, 4),
+                            "bbox_max_x_mm": round(max_x, 4),
+                            "bbox_max_y_mm": round(max_y, 4),
+                            "bbox_center_x_mm": round((min_x + max_x) / 2.0, 4),
+                            "bbox_center_y_mm": round((min_y + max_y) / 2.0, 4),
                             "layer_name": layer_match.group(1) if layer_match else "F.Cu",
                             "net_names": _footprint_net_names(block),
                             "pad_nets": _footprint_pad_net_map(block),

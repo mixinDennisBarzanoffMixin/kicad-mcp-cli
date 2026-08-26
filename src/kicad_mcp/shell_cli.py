@@ -16,6 +16,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -33,6 +34,7 @@ from .circuit_spec_arrangement import arrange_circuit_spec, format_circuit_spec_
 from .config import reset_config
 from .connection import get_board
 from .deep_inspection import (
+    _project_files,
     ascii_map,
     authority_report,
     board_drc_evidence,
@@ -45,7 +47,6 @@ from .deep_inspection import (
 )
 from .endpoint_net_equality import compare_compiled_endpoint_nets
 from .pcb.board_access import board_footprints
-from .pcb.footprint_transform import apply_footprint_rotation, verify_footprint_rotation
 from .schematic_graph_placement import (
     format_schematic_graph_placement,
     plan_schematic_graph_placement,
@@ -54,6 +55,7 @@ from .schematic_railway_rewire import format_railway_rewire_plan, plan_railway_r
 from .schematic_rewire_plan import format_label_compaction_plan, plan_label_compaction
 from .schematic_spatial import schematic_spatial_map
 from .server import build_server
+from .tools.board_file import FLOAT_PATTERN, _parse_board_footprint_blocks
 from .tools.router import TOOL_CATEGORIES, available_profiles
 
 JSONValue = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
@@ -716,6 +718,17 @@ async def run_native_board_transaction(
     *,
     label: str,
 ) -> dict[str, Any]:
+    """Keep native diagnostics off the JSON/JSONL protocol stream."""
+    with contextlib.redirect_stdout(sys.stderr):
+        return await _run_native_board_transaction(args, operations, label=label)
+
+
+async def _run_native_board_transaction(
+    args: argparse.Namespace,
+    operations: list[tuple[str, dict[str, Any]]],
+    *,
+    label: str,
+) -> dict[str, Any]:
     """Apply live PCB mutations as one IPC commit and drop on DRC regression."""
     root = Path(args.project_dir or ".").expanduser().resolve()
     authority = authority_report(root)
@@ -741,6 +754,16 @@ async def run_native_board_transaction(
     before_content = board.get_as_string()
     (artifacts / "before.kicad_pcb").write_text(before_content, encoding="utf-8")
     before_drc = board_drc_evidence(root, board_content=before_content)
+    if _placement_batch_requires_guarded_file(before_content, operations):
+        return _run_guarded_file_placement_transaction(
+            root=root,
+            board=board,
+            before_content=before_content,
+            before_drc=before_drc,
+            operations=operations,
+            artifacts=artifacts,
+            label=label,
+        )
     results: list[dict[str, JSONValue]] = []
     commit_active = False
     commit: object | None = None
@@ -760,10 +783,17 @@ async def run_native_board_transaction(
     try:
         commit = board.begin_commit()
         commit_active = True
+        offline_candidate = before_content
+        offline_candidate_complete = True
         for tool_name, arguments in operations:
             if tool_name == "_native_move_footprints_batch":
                 result = _native_move_footprints_batch(board, arguments)
+                offline_candidate = _apply_footprint_batch_to_board_content(
+                    offline_candidate,
+                    arguments,
+                )
             else:
+                offline_candidate_complete = False
                 result = await invoke_backend_tool(args, tool_name, arguments)
             results.append(result)
             if not result["ok"]:
@@ -777,7 +807,10 @@ async def run_native_board_transaction(
                     "operations": results,
                     "artifacts": str(artifacts),
                 }
-        staged_content = board.get_as_string()
+        staged_content = offline_candidate if offline_candidate_complete else board.get_as_string()
+        for tool_name, arguments in operations:
+            if tool_name == "_native_move_footprints_batch":
+                _verify_staged_footprint_batch(staged_content, arguments)
         (artifacts / "staged.kicad_pcb").write_text(staged_content, encoding="utf-8")
         diff_text = "".join(
             difflib.unified_diff(
@@ -792,11 +825,17 @@ async def run_native_board_transaction(
         new_findings = sorted(set(staged_drc["finding_keys"]) - set(before_drc["finding_keys"]))
         before_summary = cast(dict[str, int], before_drc["summary"])
         staged_summary = cast(dict[str, int], staged_drc["summary"])
-        placement_improved = (
+        # KiCad reports physical DRC violations and unrouted items in separate
+        # arrays; never subtract one from the other.
+        before_physical_violations = before_summary.get("violations", 0)
+        staged_physical_violations = staged_summary.get("violations", 0)
+        transform_only_placement = (
             label == "placement"
-            and staged_summary.get("violations", 0) < before_summary.get("violations", 0)
-            and staged_summary.get("unconnected_items", 0)
-            <= before_summary.get("unconnected_items", 0)
+            and offline_candidate_complete
+            and all(tool_name == "_native_move_footprints_batch" for tool_name, _ in operations)
+        )
+        placement_improved = (
+            transform_only_placement and staged_physical_violations < before_physical_violations
         )
         if new_findings and not placement_improved:
             drop_commit()
@@ -815,6 +854,24 @@ async def run_native_board_transaction(
             }
         push_commit()
         commit_active = False
+        placement_operations = [
+            arguments
+            for tool_name, arguments in operations
+            if tool_name == "_native_move_footprints_batch"
+        ]
+        try:
+            if placement_operations:
+                committed_content = board.get_as_string()
+            for arguments in placement_operations:
+                _verify_staged_footprint_batch(committed_content, arguments)
+                _verify_rigid_footprint_children(
+                    staged_content,
+                    committed_content,
+                    arguments,
+                )
+        except Exception:
+            board.revert()
+            raise
         try:
             board.save()
         except Exception:
@@ -830,6 +887,8 @@ async def run_native_board_transaction(
             "operations": results,
             "before_drc": before_drc,
             "staged_drc": staged_drc,
+            "before_physical_violations": before_physical_violations,
+            "staged_physical_violations": staged_physical_violations,
             "accepted_placement_improvement": placement_improved,
             "new_drc_findings_after_improvement": (
                 [json.loads(item) for item in new_findings] if placement_improved else []
@@ -863,9 +922,8 @@ def _native_move_footprints_batch(
         str(footprint.reference_field.text.value): footprint for footprint in footprints
     }
     missing: list[str] = []
+    resolved: list[tuple[str, object, float, float, float]] = []
     changed: list[object] = []
-    rotation_attributes: dict[str, str] = {}
-    requested_rotations: dict[str, float] = {}
     for raw in raw_placements:
         if not isinstance(raw, dict):
             return {
@@ -881,32 +939,290 @@ def _native_move_footprints_batch(
         x_mm = float(raw["x_mm"])
         y_mm = float(raw["y_mm"])
         rotation_deg = float(raw.get("rotation_deg", 0.0))
-        footprint.position = Vector2.from_xy_mm(x_mm, y_mm)
-        rotation_attributes[reference] = apply_footprint_rotation(footprint, rotation_deg)
-        requested_rotations[reference] = rotation_deg
-        changed.append(footprint)
+        resolved.append((reference, footprint, x_mm, y_mm, rotation_deg))
     if missing:
         return {
             "ok": False,
             "tool": "_native_move_footprints_batch",
             "error": "missing footprint references: " + ", ".join(sorted(missing)),
         }
+    rotation_changes: list[str] = []
+    for reference, footprint, _x_mm, _y_mm, rotation_deg in resolved:
+        orientation = getattr(footprint, "orientation", None)
+        if orientation is None:
+            orientation = getattr(footprint, "angle", None)
+        current_deg = float(getattr(orientation, "degrees", orientation))
+        delta = (current_deg - rotation_deg + 180.0) % 360.0 - 180.0
+        if abs(delta) > 1e-3:
+            rotation_changes.append(f"{reference}:{current_deg:g}->{rotation_deg:g}")
+    if rotation_changes:
+        return {
+            "ok": False,
+            "tool": "_native_move_footprints_batch",
+            "error": (
+                "native footprint orientation is not a rigid child transform; "
+                "rotation changes require the guarded file-level rigid-rotation path: "
+                + ", ".join(rotation_changes)
+            ),
+        }
+    for _reference, footprint, x_mm, y_mm, _rotation_deg in resolved:
+        footprint.position = Vector2.from_xy_mm(x_mm, y_mm)
+        changed.append(footprint)
     board.update_items(changed)
-    refreshed = {
-        str(footprint.reference_field.text.value): footprint
-        for footprint in board_footprints(board)
-    }
-    for reference, attribute in rotation_attributes.items():
-        verify_footprint_rotation(
-            refreshed[reference],
-            attribute,  # type: ignore[arg-type]
-            requested_rotations[reference],
-        )
     return {
         "ok": True,
         "tool": "_native_move_footprints_batch",
         "result": {"moved": len(changed)},
     }
+
+
+def _placement_batch_requires_guarded_file(
+    board_content: str,
+    operations: list[tuple[str, dict[str, Any]]],
+) -> bool:
+    """Use rigid file transforms when a moved footprint owns embedded zones."""
+    if not operations or any(name != "_native_move_footprints_batch" for name, _ in operations):
+        return False
+    footprints = _parse_board_footprint_blocks(board_content)
+    for _name, arguments in operations:
+        placements = arguments.get("placements", [])
+        if not isinstance(placements, list):
+            continue
+        for raw in placements:
+            if not isinstance(raw, dict):
+                continue
+            footprint = footprints.get(str(raw.get("reference", "")))
+            if footprint is not None and "(zone" in str(footprint["block"]):
+                return True
+    return False
+
+
+def _run_guarded_file_placement_transaction(
+    *,
+    root: Path,
+    board: object,
+    before_content: str,
+    before_drc: dict[str, Any],
+    operations: list[tuple[str, dict[str, Any]]],
+    artifacts: Path,
+    label: str,
+) -> dict[str, Any]:
+    """Apply root-only transforms atomically when KiCad IPC cannot move rigidly."""
+    staged_content = before_content
+    moved = 0
+    for _tool_name, arguments in operations:
+        staged_content = _apply_footprint_batch_to_board_content(staged_content, arguments)
+        placements = arguments.get("placements", [])
+        moved += len(placements) if isinstance(placements, list) else 0
+    for _tool_name, arguments in operations:
+        _verify_staged_footprint_batch(staged_content, arguments)
+        _verify_rigid_footprint_children(before_content, staged_content, arguments)
+
+    (artifacts / "staged.kicad_pcb").write_text(staged_content, encoding="utf-8")
+    diff_text = "".join(
+        difflib.unified_diff(
+            before_content.splitlines(keepends=True),
+            staged_content.splitlines(keepends=True),
+            fromfile="before.kicad_pcb",
+            tofile="staged.kicad_pcb",
+        )
+    )
+    (artifacts / "edit.diff").write_text(diff_text, encoding="utf-8")
+    staged_drc = board_drc_evidence(root, board_content=staged_content)
+    new_findings = sorted(set(staged_drc["finding_keys"]) - set(before_drc["finding_keys"]))
+    before_summary = cast(dict[str, int], before_drc["summary"])
+    staged_summary = cast(dict[str, int], staged_drc["summary"])
+    before_physical = before_summary.get("violations", 0)
+    staged_physical = staged_summary.get("violations", 0)
+    placement_improved = staged_physical < before_physical
+    if new_findings and not placement_improved:
+        return {
+            "schema_version": "1.0",
+            "status": "rejected",
+            "committed": False,
+            "reason": "staged board introduces new DRC findings",
+            "new_drc_findings": [json.loads(item) for item in new_findings],
+            "before_drc": before_drc,
+            "staged_drc": staged_drc,
+            "artifacts": str(artifacts),
+            "diff": str(artifacts / "edit.diff"),
+        }
+
+    _project, _schematic, board_path = _project_files(root)
+    temporary_path = board_path.with_name(f".{board_path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary_path.write_text(staged_content, encoding="utf-8")
+        temporary_path.replace(board_path)
+        board.revert()
+        final_authority = authority_report(root)
+        if not final_authority["policy"]["board_mutation_allowed"]:
+            raise RuntimeError("guarded placement failed the live/disk synchronization gate")
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        board_path.write_text(before_content, encoding="utf-8")
+        with contextlib.suppress(Exception):
+            board.revert()
+        raise
+
+    return {
+        "schema_version": "1.0",
+        "status": "pass",
+        "committed": True,
+        "write_authority": "guarded-rigid-file",
+        "reason": "embedded footprint zones require a rigid root-only transform",
+        "operations": [
+            {
+                "ok": True,
+                "tool": "_native_move_footprints_batch",
+                "result": {"moved": moved},
+            }
+        ],
+        "before_drc": before_drc,
+        "staged_drc": staged_drc,
+        "before_physical_violations": before_physical,
+        "staged_physical_violations": staged_physical,
+        "accepted_placement_improvement": placement_improved,
+        "new_drc_findings_after_improvement": (
+            [json.loads(item) for item in new_findings] if placement_improved else []
+        ),
+        "authority": final_authority,
+        "artifacts": str(artifacts),
+        "diff": str(artifacts / "edit.diff"),
+        "diff_lines": len(diff_text.splitlines()),
+        "label": label,
+    }
+
+
+def _verify_staged_footprint_batch(
+    board_content: str,
+    arguments: dict[str, Any],
+    *,
+    tolerance_mm: float = 1e-3,
+    tolerance_deg: float = 1e-3,
+) -> None:
+    """Verify one native batch against KiCad's staged serialized board."""
+    footprints = _parse_board_footprint_blocks(board_content)
+    raw_placements = arguments.get("placements", [])
+    if not isinstance(raw_placements, list):
+        raise RuntimeError("staged placement verification requires a placements list")
+    for raw in raw_placements:
+        if not isinstance(raw, dict):
+            raise RuntimeError("staged placement verification received a non-object placement")
+        reference = str(raw.get("reference", ""))
+        footprint = footprints.get(reference)
+        if footprint is None:
+            raise RuntimeError(
+                f"staged placement verification could not reload footprint '{reference}'"
+            )
+        requested_x = float(raw["x_mm"])
+        requested_y = float(raw["y_mm"])
+        actual_x = float(footprint["x_mm"])
+        actual_y = float(footprint["y_mm"])
+        if abs(actual_x - requested_x) > tolerance_mm or abs(actual_y - requested_y) > tolerance_mm:
+            raise RuntimeError(
+                f"staged placement verification failed for '{reference}': requested "
+                f"({requested_x:.4f}, {requested_y:.4f}) mm, observed "
+                f"({actual_x:.4f}, {actual_y:.4f}) mm"
+            )
+        requested_rotation = float(raw.get("rotation_deg", 0.0))
+        actual_rotation = float(footprint.get("rotation", 0.0) or 0.0)
+        rotation_delta = (actual_rotation - requested_rotation + 180.0) % 360.0 - 180.0
+        if abs(rotation_delta) > tolerance_deg:
+            raise RuntimeError(
+                f"staged placement verification failed for '{reference}': requested "
+                f"{requested_rotation:.4f} degrees, observed {actual_rotation:.4f} degrees"
+            )
+
+
+def _verify_rigid_footprint_children(
+    expected_content: str,
+    observed_content: str,
+    arguments: dict[str, Any],
+) -> None:
+    """Reject IPC moves that mutate any footprint child geometry.
+
+    KiCad 10 IPC currently translates some embedded footprint zones when only
+    the parent position is updated.  Position-only placement must be a rigid
+    transform: after normalizing the requested root ``(at ...)``, every child
+    token must remain byte-identical to the offline candidate.
+    """
+    expected = _parse_board_footprint_blocks(expected_content)
+    observed = _parse_board_footprint_blocks(observed_content)
+    root_at_pattern = re.compile(
+        rf"(?P<indent>^[ \t]*)\(at\s+{FLOAT_PATTERN}\s+{FLOAT_PATTERN}"
+        rf"(?:\s+{FLOAT_PATTERN})?\)",
+        flags=re.MULTILINE,
+    )
+
+    def without_root_transform(block: str) -> str:
+        return root_at_pattern.sub(r"\g<indent>(at <ROOT_TRANSFORM>)", block, count=1)
+
+    changed: list[str] = []
+    raw_placements = arguments.get("placements", [])
+    if not isinstance(raw_placements, list):
+        raise RuntimeError("rigid footprint verification requires a placements list")
+    for raw in raw_placements:
+        if not isinstance(raw, dict):
+            raise RuntimeError("rigid footprint verification received a non-object placement")
+        reference = str(raw.get("reference", ""))
+        expected_footprint = expected.get(reference)
+        observed_footprint = observed.get(reference)
+        if expected_footprint is None or observed_footprint is None:
+            changed.append(reference)
+            continue
+        if without_root_transform(str(expected_footprint["block"])) != without_root_transform(
+            str(observed_footprint["block"])
+        ):
+            changed.append(reference)
+    if changed:
+        raise RuntimeError(
+            "native footprint move changed child geometry; board reverted: "
+            + ", ".join(sorted(changed))
+        )
+
+
+def _apply_footprint_batch_to_board_content(
+    board_content: str,
+    arguments: dict[str, Any],
+) -> str:
+    """Create a DRC-able placement candidate without exposing unpushed IPC state."""
+    footprints = _parse_board_footprint_blocks(board_content)
+    raw_placements = arguments.get("placements", [])
+    if not isinstance(raw_placements, list):
+        raise RuntimeError("offline placement candidate requires a placements list")
+    replacements: list[tuple[int, int, str]] = []
+    root_at_pattern = re.compile(
+        rf"(?P<indent>^[ \t]*)\(at\s+{FLOAT_PATTERN}\s+{FLOAT_PATTERN}"
+        rf"(?:\s+{FLOAT_PATTERN})?\)",
+        flags=re.MULTILINE,
+    )
+    for raw in raw_placements:
+        if not isinstance(raw, dict):
+            raise RuntimeError("offline placement candidate received a non-object placement")
+        reference = str(raw.get("reference", ""))
+        footprint = footprints.get(reference)
+        if footprint is None:
+            raise RuntimeError(
+                f"offline placement candidate could not reload footprint '{reference}'"
+            )
+        block = str(footprint["block"])
+        match = root_at_pattern.search(block)
+        if match is None:
+            raise RuntimeError(
+                f"offline placement candidate found no root transform for '{reference}'"
+            )
+        x_mm = float(raw["x_mm"])
+        y_mm = float(raw["y_mm"])
+        rotation_deg = float(raw.get("rotation_deg", 0.0))
+        replacement = f"{match.group('indent')}(at {x_mm:.4f} {y_mm:.4f} {rotation_deg:.4f})"
+        updated_block = block[: match.start()] + replacement + block[match.end() :]
+        replacements.append((int(footprint["start"]), int(footprint["end"]), updated_block))
+
+    candidate = board_content
+    for start, end, updated_block in sorted(replacements, reverse=True):
+        candidate = candidate[:start] + updated_block + candidate[end:]
+    _verify_staged_footprint_batch(candidate, arguments)
+    return candidate
 
 
 def _rg_binary() -> str:
@@ -1277,6 +1593,14 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="X1,Y1,X2,Y2",
         help="absolute board keepout rectangle in mm; repeatable",
     )
+    place.add_argument(
+        "--cluster",
+        dest="cluster_regions",
+        action="append",
+        default=[],
+        metavar="SHEET,X1,Y1,X2,Y2",
+        help="constrain one hierarchical sheet to an absolute board region; repeatable",
+    )
     place.add_argument("--margin", type=float, default=3.0, dest="margin_mm")
     place.add_argument("--iterations", type=int, default=300)
     place.add_argument("--grid", type=float, default=0.5, dest="grid_mm")
@@ -1609,6 +1933,20 @@ def main(argv: Sequence[str] | None = None) -> None:
                 if len(values) != 4:
                     raise ValueError("--keepout requires X1,Y1,X2,Y2")
                 keepouts.append(values)
+            clusters: list[dict[str, Any]] = []
+            for raw in args.cluster_regions:
+                values = [value.strip() for value in raw.split(",")]
+                if len(values) != 5:
+                    raise ValueError("--cluster requires SHEET,X1,Y1,X2,Y2")
+                clusters.append(
+                    {
+                        "sheet": values[0],
+                        "x1_mm": float(values[1]),
+                        "y1_mm": float(values[2]),
+                        "x2_mm": float(values[3]),
+                        "y2_mm": float(values[4]),
+                    }
+                )
             anchors: list[dict[str, Any]] = []
             for raw in args.anchors:
                 values = [value.strip() for value in raw.split(",")]
@@ -1638,6 +1976,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 project_snapshot(args.project_dir or "."),
                 fixed_references=args.fixed_references,
                 anchors=anchors,
+                cluster_regions=clusters,
                 keepout_regions=keepouts,
                 margin_mm=args.margin_mm,
                 iterations=args.iterations,
