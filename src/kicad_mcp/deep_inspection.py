@@ -2103,6 +2103,7 @@ def route_plan(
 
     segments: list[JsonRecord] = []
     collisions = 0
+    collision_findings: list[JsonRecord] = []
     routing_methods: list[str] = []
     for start, end in edges:
         excluded_refs = {str(start["reference"]), str(end["reference"])}
@@ -2123,6 +2124,7 @@ def route_plan(
             width_mm=width_mm,
             excluded_refs=excluded_refs,
             net_name=net_name,
+            findings=collision_findings,
         )
         for first, second in zip(points, points[1:], strict=False):
             if first == second:
@@ -2139,9 +2141,14 @@ def route_plan(
                 }
             )
     return {
-        "status": "planned",
+        "status": "blocked" if collisions else "planned",
         "net": net_name,
         "critical": critical,
+        "reason": (
+            "no collision-free orthogonal route exists at the requested width and clearance"
+            if collisions
+            else None
+        ),
         "layer": layer,
         "width_mm": width_mm,
         "clearance_mm": clearance_mm,
@@ -2152,6 +2159,7 @@ def route_plan(
             "Review geometry before applying; no differential-pair or impedance solver is used.",
         ],
         "collision_score": collisions,
+        "collision_findings": collision_findings,
         "routing_methods": routing_methods,
     }
 
@@ -2514,11 +2522,14 @@ def _route_collision_score(
     width_mm: float = 0.0,
     excluded_refs: set[str] | None = None,
     net_name: str = "",
+    findings: list[JsonRecord] | None = None,
 ) -> int:
     if len(points) < 2:
         return 0
     score = 0
-    for first, second in zip(points, points[1:], strict=False):
+    for segment_index, (first, second) in enumerate(
+        zip(points, points[1:], strict=False), start=1
+    ):
         sx1, sx2 = sorted((first[0], second[0]))
         sy1, sy2 = sorted((first[1], second[1]))
         for footprint in board["footprints"]:
@@ -2536,8 +2547,17 @@ def _route_collision_score(
                     if len(pad_at) != 2 or len(pad_size) != 2:
                         continue
                     half_trace = width_mm / 2.0
-                    half_width = float(pad_size[0]) / 2.0 + clearance + half_trace
-                    half_height = float(pad_size[1]) / 2.0 + clearance + half_trace
+                    pad_angle = math.radians(float(pad.get("rotation", 0.0) or 0.0))
+                    raw_half_width = float(pad_size[0]) / 2.0
+                    raw_half_height = float(pad_size[1]) / 2.0
+                    rotated_half_width = abs(raw_half_width * math.cos(pad_angle)) + abs(
+                        raw_half_height * math.sin(pad_angle)
+                    )
+                    rotated_half_height = abs(raw_half_width * math.sin(pad_angle)) + abs(
+                        raw_half_height * math.cos(pad_angle)
+                    )
+                    half_width = rotated_half_width + clearance + half_trace
+                    half_height = rotated_half_height + clearance + half_trace
                     if _segment_intersects_box(
                         first,
                         second,
@@ -2547,6 +2567,18 @@ def _route_collision_score(
                         bottom=float(pad_at[1]) + half_height,
                     ):
                         score += 1
+                        if findings is not None:
+                            findings.append(
+                                {
+                                    "segment": segment_index,
+                                    "kind": "endpoint_neighbor_pad",
+                                    "reference": reference,
+                                    "pad": str(pad.get("number", "")),
+                                    "net": str(pad.get("net", "")),
+                                    "at": list(pad_at),
+                                    "size": list(pad_size),
+                                }
+                            )
                 continue
             cx = float(footprint["x_mm"])
             cy = float(footprint["y_mm"])
@@ -2560,6 +2592,19 @@ def _route_collision_score(
             )
             if overlaps:
                 score += 1
+                if findings is not None:
+                    findings.append(
+                        {
+                            "segment": segment_index,
+                            "kind": "footprint_envelope",
+                            "reference": reference,
+                            "at": [cx, cy],
+                            "size": [
+                                float(footprint["width_mm"]),
+                                float(footprint["height_mm"]),
+                            ],
+                        }
+                    )
         for track in board.get("tracks", []):
             if track.get("net") == net_name:
                 continue
@@ -2567,6 +2612,17 @@ def _route_collision_score(
                 continue
             if _segments_intersect(first, second, track["start"], track["end"], clearance):
                 score += 1
+                if findings is not None:
+                    findings.append(
+                        {
+                            "segment": segment_index,
+                            "kind": "existing_track",
+                            "net": str(track.get("net", "")),
+                            "layer": str(track.get("layer", "")),
+                            "start": list(track["start"]),
+                            "end": list(track["end"]),
+                        }
+                    )
     return score
 
 

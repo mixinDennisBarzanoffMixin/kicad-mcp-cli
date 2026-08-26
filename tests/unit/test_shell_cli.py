@@ -951,7 +951,35 @@ def test_route_plan_keeps_adjacent_endpoint_pads_as_obstacles() -> None:
     wide = route_plan(snapshot, "GPIO", width_mm=1.0, clearance_mm=0.2)
 
     assert narrow["collision_score"] == 0
+    assert narrow["status"] == "planned"
     assert wide["collision_score"] > 0
+    assert wide["status"] == "blocked"
+    assert "requested width and clearance" in str(wide["reason"])
+    assert any(
+        finding["kind"] == "endpoint_neighbor_pad" and finding["pad"] == "2"
+        for finding in wide["collision_findings"]
+    )
+
+
+def test_route_plan_rotates_anisotropic_endpoint_pad_obstacles() -> None:
+    snapshot = copy.deepcopy(_snapshot())
+    snapshot["board"]["footprints"][0]["pads"].append(
+        {
+            "number": "2",
+            "at": [5.0, 5.5],
+            "size": [0.35, 1.8],
+            "rotation": 90.0,
+            "net": "GND",
+        }
+    )
+    snapshot["board"]["footprints"][0]["pads"][0]["size"] = [0.35, 1.45]
+    snapshot["board"]["footprints"][0]["pads"][0]["rotation"] = 90.0
+    snapshot["board"]["footprints"][1]["pads"][0]["size"] = [0.5, 0.5]
+
+    plan = route_plan(snapshot, "GPIO", width_mm=0.2, clearance_mm=0.15)
+
+    assert plan["status"] == "planned"
+    assert plan["collision_findings"] == []
 
 
 def test_critical_placement_report_measures_same_net_pad_distance() -> None:
