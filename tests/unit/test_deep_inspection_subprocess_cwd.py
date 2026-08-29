@@ -9,9 +9,7 @@ from types import SimpleNamespace
 from kicad_mcp import deep_inspection
 
 
-def test_netlist_export_runs_from_selected_schematic_directory(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_netlist_export_runs_from_selected_schematic_directory(tmp_path: Path, monkeypatch) -> None:
     project = tmp_path / "staged-project"
     project.mkdir()
     schematic = project / "demo.kicad_sch"
@@ -42,9 +40,7 @@ def test_erc_runs_from_selected_schematic_directory(tmp_path: Path, monkeypatch)
     def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
         observed["cwd"] = kwargs.get("cwd")
         output = Path(command[command.index("-o") + 1])
-        output.write_text(
-            json.dumps({"kicad_version": "test", "sheets": []}), encoding="utf-8"
-        )
+        output.write_text(json.dumps({"kicad_version": "test", "sheets": []}), encoding="utf-8")
         return SimpleNamespace(returncode=0, stderr="", stdout="")
 
     monkeypatch.setattr(deep_inspection, "_kicad_cli", lambda: "kicad-cli")
@@ -75,13 +71,7 @@ def test_svg_export_runs_from_selected_schematic_directory(tmp_path: Path, monke
 
     deep_inspection._render_verification_svgs(
         schematic,
-        {
-            "schematic": {
-                "sheets": [
-                    {"name": "Power", "number": 1, "file": "power.kicad_sch"}
-                ]
-            }
-        },
+        {"schematic": {"sheets": [{"name": "Power", "number": 1, "file": "power.kicad_sch"}]}},
         output_dir,
         sheet="Power",
     )

@@ -127,9 +127,9 @@ def test_get_cli_capabilities_and_recent_projects_cover_fallbacks(
         isolated.setattr(
             discovery.Path,
             "exists",
-            lambda path: False
-            if str(path).startswith("/Applications/KiCad/")
-            else real_exists(path),
+            lambda path: (
+                False if str(path).startswith("/Applications/KiCad/") else real_exists(path)
+            ),
         )
         assert discovery.discover_library_paths(tmp_path / "cli") == {
             "root": None,

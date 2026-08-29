@@ -113,7 +113,6 @@ class CompilationHarness:
         )
         return self.prepared
 
-
     def render_report(
         self,
         *,

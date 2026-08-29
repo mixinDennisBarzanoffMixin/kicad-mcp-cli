@@ -57,9 +57,7 @@ def test_zero_exit_without_svg_is_reported_as_failure(tmp_path: Path, monkeypatc
     assert result.startswith("Footprint SVG export failed:")
 
 
-def test_unchanged_stale_svg_does_not_count_as_new_export(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_unchanged_stale_svg_does_not_count_as_new_export(tmp_path: Path, monkeypatch) -> None:
     library = tmp_path / "Demo.pretty"
     library.mkdir()
     output = tmp_path / "svg-output"

@@ -8,7 +8,7 @@ from kicad_mcp.deep_inspection import (
     _via_records,
 )
 
-KICAD_10_BOARD = r'''(kicad_pcb
+KICAD_10_BOARD = r"""(kicad_pcb
   (version 20260206)
   (generator "pcbnew")
   (gr_rect (start 0 0) (end 20 10)
@@ -29,7 +29,7 @@ KICAD_10_BOARD = r'''(kicad_pcb
   (via (at 2 5) (size 0.6) (drill 0.3)
     (layers "F.Cu" "B.Cu") (net "GND"))
   (zone (net "GND") (net_name "GND") (layer "B.Cu"))
-)'''
+)"""
 
 
 def test_kicad_10_name_based_net_identity() -> None:

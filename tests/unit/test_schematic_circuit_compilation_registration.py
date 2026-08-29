@@ -116,7 +116,7 @@ def test_registration_preserves_names_descriptions_and_schemas() -> None:
         "geometry. Nets that cannot resolve every requested pin endpoint raise a\n"
         "clear error before the schematic is snapshotted or written; partial\n"
         "compilation is never emitted.\n\n"
-        "A pin endpoint may be a compatible ``\"REF.PIN\"`` string. For multi-unit\n"
+        'A pin endpoint may be a compatible ``"REF.PIN"`` string. For multi-unit\n'
         "components, strings are accepted only when the pin identifies exactly one\n"
         "placed unit. The authoritative form is\n"
         '``{"reference": "U2", "unit": 3, "pin": "100"}``.\n\n'

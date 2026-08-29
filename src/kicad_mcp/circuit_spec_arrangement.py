@@ -234,9 +234,7 @@ def _rewrite_layout_identities(
         return value
 
     public = cast(JsonRecord, rewrite(copy.deepcopy(layout)))
-    for source_placement, placement in zip(
-        layout["placements"], public["placements"], strict=True
-    ):
+    for source_placement, placement in zip(layout["placements"], public["placements"], strict=True):
         internal = str(source_placement["reference"])
         reference, unit = identities[internal]
         placement["reference"] = reference

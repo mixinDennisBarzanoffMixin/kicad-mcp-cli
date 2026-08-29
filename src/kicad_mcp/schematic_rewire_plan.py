@@ -418,7 +418,7 @@ def plan_label_compaction(
                 if not any(_point_on_segment(point, wire) for wire in existing_wires)
             ]
             if unattached and not _same_point(redundant_at, retained_at):
-                reasons = [
+                reasons: list[JsonRecord] = [
                     {
                         "code": "label_anchor_attachment_unproven",
                         "label_id": label_id,

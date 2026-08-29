@@ -13,7 +13,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .utils.sexpr import _extract_block
 
@@ -216,13 +216,13 @@ def select_schematic_sheet(snapshot: JsonRecord, sheet: str, center_reference: s
     if len(matches) > 1:
         names = ", ".join(str(item.get("name") or item.get("file")) for item in matches)
         raise ValueError(f"spatial target is ambiguous: {names}")
-    return matches[0]
+    return cast(JsonRecord, matches[0])
 
 
 def _extent(geometry: SchematicGeometry) -> tuple[float, float, float, float]:
-    points = [(item.x_mm, item.y_mm) for item in (*geometry.symbols, *geometry.labels)] + [
-        point for wire in geometry.wires for point in wire.points
-    ]
+    points = [(symbol.x_mm, symbol.y_mm) for symbol in geometry.symbols]
+    points.extend((label.x_mm, label.y_mm) for label in geometry.labels)
+    points.extend(point for wire in geometry.wires for point in wire.points)
     if not points:
         return (0.0, 0.0, 100.0, 60.0)
     xs = [point[0] for point in points]
@@ -386,8 +386,11 @@ def schematic_spatial_map(
     claimed_component_cells: set[tuple[int, int]] = set()
     for symbol in visible_symbols:
         column, row = cell((symbol.x_mm, symbol.y_mm))
-        label = f"[{_truncate(symbol.reference, 12)}]"
-        start = max(1, min(columns - len(label) - 1, column - len(label) // 2))
+        component_text = f"[{_truncate(symbol.reference, 12)}]"
+        component_start = max(
+            1,
+            min(columns - len(component_text) - 1, column - len(component_text) // 2),
+        )
         candidates = [row, row - 1, row + 1, row - 2, row + 2]
         target_row = next(
             (
@@ -396,14 +399,14 @@ def schematic_spatial_map(
                 if 0 < candidate < rows - 1
                 and not any(
                     (target, candidate) in claimed_component_cells
-                    for target in range(start, start + len(label))
+                    for target in range(component_start, component_start + len(component_text))
                 )
             ),
             None,
         )
         if target_row is not None:
-            for offset, character in enumerate(label):
-                target_column = start + offset
+            for offset, character in enumerate(component_text):
+                target_column = component_start + offset
                 grid[target_row][target_column] = character
                 claimed_component_cells.add((target_column, target_row))
 

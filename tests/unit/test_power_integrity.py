@@ -1,11 +1,26 @@
 from __future__ import annotations
 
+from mcp.server.fastmcp import FastMCP
+
 from kicad_mcp.tools.power_integrity import (
     _ipc_current_capacity_a,
     _required_width_mm,
     _track_resistance_ohm,
+    register,
 )
 from kicad_mcp.utils.pdn_mesh import PdnLoad, PdnMesh
+
+
+def test_power_loop_report_tool_is_registered_for_direct_inspection() -> None:
+    server = FastMCP("power-integrity-test")
+
+    register(server)
+
+    tools = {tool.name: tool for tool in server._tool_manager.list_tools()}
+    assert "pcb_get_power_loop_report" in tools
+    assert "actual rail-pad and ground-pad geometry" in (
+        tools["pcb_get_power_loop_report"].description or ""
+    )
 
 
 def test_track_resistance_and_drop_are_reasonable() -> None:

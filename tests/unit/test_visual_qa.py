@@ -246,7 +246,7 @@ def test_detect_label_symbol_overlap_catches_text_drawn_through_body() -> None:
     sch = OVERLAP_SCH.replace(
         "\n)",
         '\n  (global_label "BAD_NET" (shape bidirectional) (at 100 100 0) '
-        '(effects (font (size 1.27 1.27))))\n)',
+        "(effects (font (size 1.27 1.27))))\n)",
         1,
     )
 
@@ -257,8 +257,7 @@ def test_detect_label_symbol_overlap_catches_text_drawn_through_body() -> None:
 
 def test_detect_symbol_label_density_reports_crowded_component() -> None:
     labels = "\n".join(
-        f'  (label "N{idx}" (at {99 + idx * 0.2} 100 0) '
-        '(effects (font (size 1.27 1.27))))'
+        f'  (label "N{idx}" (at {99 + idx * 0.2} 100 0) (effects (font (size 1.27 1.27))))'
         for idx in range(4)
     )
     sch = OVERLAP_SCH.replace("\n)", f"\n{labels}\n)", 1)

@@ -76,14 +76,10 @@ def _segments_intersect(first: WireSegment, second: WireSegment) -> bool:
 
     tolerance = 1e-6
 
-    def orientation(
-        ax: float, ay: float, bx: float, by: float, cx: float, cy: float
-    ) -> float:
+    def orientation(ax: float, ay: float, bx: float, by: float, cx: float, cy: float) -> float:
         return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
 
-    def on_segment(
-        ax: float, ay: float, bx: float, by: float, cx: float, cy: float
-    ) -> bool:
+    def on_segment(ax: float, ay: float, bx: float, by: float, cx: float, cy: float) -> bool:
         return (
             min(ax, bx) - tolerance <= cx <= max(ax, bx) + tolerance
             and min(ay, by) - tolerance <= cy <= max(ay, by) + tolerance
@@ -415,9 +411,7 @@ class SchematicConnectivityAuthoringService:
                 lane_x = round(bend_x + vx * fanout_mm, 4)
                 lane_y = round(bend_y + vy * fanout_mm, 4)
                 route_points = [(px, py), (bend_x, bend_y), (lane_x, lane_y), (ex, ey)]
-                for (x1, y1), (x2, y2) in zip(
-                    route_points, route_points[1:], strict=False
-                ):
+                for (x1, y1), (x2, y2) in zip(route_points, route_points[1:], strict=False):
                     if (x1, y1) != (x2, y2):
                         candidate_segments.append((x1, y1, x2, y2))
             else:
@@ -535,8 +529,7 @@ class SchematicConnectivityAuthoringService:
         return (
             f"{self.reload_schematic()}\n{self.format_target_detail(target)}\n"
             f"Added {len(terminal_blocks)} pin terminal(s) with stubs "
-            f"({len(wire_blocks)} wire segment(s)):\n"
-            + "\n".join(results)
+            f"({len(wire_blocks)} wire segment(s)):\n" + "\n".join(results)
         )
 
     def route_wire_between_pins(

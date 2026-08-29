@@ -1573,9 +1573,7 @@ def _entry_bounds(
     height_mm = float(cast(float, entry["height_mm"]))
     body_width_mm = float(cast(float, entry.get("body_width_mm", width_mm) or width_mm))
     body_height_mm = float(cast(float, entry.get("body_height_mm", height_mm) or height_mm))
-    owns_extended_keepout = (
-        width_mm > body_width_mm * 1.5 or height_mm > body_height_mm * 1.5
-    )
+    owns_extended_keepout = width_mm > body_width_mm * 1.5 or height_mm > body_height_mm * 1.5
     min_x_key = "body_bbox_min_x_mm" if owns_extended_keepout else "bbox_min_x_mm"
     min_y_key = "body_bbox_min_y_mm" if owns_extended_keepout else "bbox_min_y_mm"
     max_x_key = "body_bbox_max_x_mm" if owns_extended_keepout else "bbox_max_x_mm"

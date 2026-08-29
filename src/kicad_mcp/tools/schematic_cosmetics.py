@@ -389,9 +389,7 @@ def _mutate_resolve_label_overlaps(content: str) -> tuple[str, list[dict[str, An
         return content, []
 
     field_boxes = [
-        field.box()
-        for symbol in visual_qa.parse_placed_symbols(content)
-        for field in symbol.fields
+        field.box() for symbol in visual_qa.parse_placed_symbols(content) for field in symbol.fields
     ]
     symbol_boxes = [symbol.body for symbol in visual_qa.parse_placed_symbols(content)]
 
@@ -566,14 +564,12 @@ def _mutate_slide_overlapping_labels(content: str) -> tuple[str, list[dict[str, 
         if abs(wire.y1 - wire.y2) <= tolerance:
             return (
                 abs(y - wire.y1) <= tolerance
-                and min(wire.x1, wire.x2) - tolerance <= x
-                <= max(wire.x1, wire.x2) + tolerance
+                and min(wire.x1, wire.x2) - tolerance <= x <= max(wire.x1, wire.x2) + tolerance
             )
         if abs(wire.x1 - wire.x2) <= tolerance:
             return (
                 abs(x - wire.x1) <= tolerance
-                and min(wire.y1, wire.y2) - tolerance <= y
-                <= max(wire.y1, wire.y2) + tolerance
+                and min(wire.y1, wire.y2) - tolerance <= y <= max(wire.y1, wire.y2) + tolerance
             )
         return False
 

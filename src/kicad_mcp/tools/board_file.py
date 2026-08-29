@@ -197,12 +197,8 @@ def _body_bbox_extents_from_block(block: str) -> tuple[float, float, float, floa
         half_width = float(size_match.group(1)) / 2.0
         half_height = float(size_match.group(2)) / 2.0
         angle = math.radians(float(at_match.group(3) or 0.0) - root_rotation_deg)
-        rotated_half_width = abs(half_width * math.cos(angle)) + abs(
-            half_height * math.sin(angle)
-        )
-        rotated_half_height = abs(half_width * math.sin(angle)) + abs(
-            half_height * math.cos(angle)
-        )
+        rotated_half_width = abs(half_width * math.cos(angle)) + abs(half_height * math.sin(angle))
+        rotated_half_height = abs(half_width * math.sin(angle)) + abs(half_height * math.cos(angle))
         xs.extend([center_x - rotated_half_width, center_x + rotated_half_width])
         ys.extend([center_y - rotated_half_height, center_y + rotated_half_height])
 
@@ -222,15 +218,15 @@ def _courtyard_polygons_from_block(block: str) -> list[list[list[float]]]:
     for rect in _iter_blocks(block, "fp_rect"):
         if re.search(r'\(layer\s+"[FB]\.CrtYd"\)', rect) is None:
             continue
-        points = re.search(
+        rect_points_match = re.search(
             rf"\(start\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})\).*?"
             rf"\(end\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})\)",
             rect,
             flags=re.DOTALL,
         )
-        if points is None:
+        if rect_points_match is None:
             continue
-        x1, y1, x2, y2 = (float(points.group(index)) for index in range(1, 5))
+        x1, y1, x2, y2 = (float(rect_points_match.group(index)) for index in range(1, 5))
         polygons.append([[x1, y1], [x2, y1], [x2, y2], [x1, y2]])
 
     for poly in _iter_blocks(block, "fp_poly"):
@@ -239,15 +235,15 @@ def _courtyard_polygons_from_block(block: str) -> list[list[list[float]]]:
         points_match = re.search(r"\(pts\s+(.*?)\)\s*\(stroke", poly, flags=re.DOTALL)
         if points_match is None:
             continue
-        points = [
+        polygon_points = [
             [float(match.group(1)), float(match.group(2))]
             for match in re.finditer(
                 rf"\(xy\s+({FLOAT_PATTERN})\s+({FLOAT_PATTERN})\)",
                 points_match.group(1),
             )
         ]
-        if len(points) >= 3:
-            polygons.append(points)
+        if len(polygon_points) >= 3:
+            polygons.append(polygon_points)
 
     def key(point: tuple[float, float]) -> tuple[float, float]:
         return round(point[0], 6), round(point[1], 6)
@@ -278,11 +274,7 @@ def _courtyard_polygons_from_block(block: str) -> list[list[list[float]]]:
         loop = [start, current]
         while current != start:
             next_index = next(
-                (
-                    index
-                    for index in sorted(unused)
-                    if current in segments[index]
-                ),
+                (index for index in sorted(unused) if current in segments[index]),
                 None,
             )
             if next_index is None:

@@ -77,7 +77,7 @@ def _directed_arcs(
     # only as a deterministic fallback when electrical pin types cannot orient a
     # net.  This yields the natural J -> protection -> series link -> IC railway
     # without pretending passive/bidirectional pins have authoritative direction.
-    flow_adjacency = {reference: set() for reference in references}
+    flow_adjacency: dict[str, set[str]] = {reference: set() for reference in references}
     for net in nets:
         if str(net["name"]) in rails:
             continue
@@ -241,8 +241,8 @@ def _directed_arcs(
 
 
 def _strong_components(references: set[str], arcs: set[tuple[str, str]]) -> list[list[str]]:
-    adjacency = {ref: [] for ref in references}
-    reverse = {ref: [] for ref in references}
+    adjacency: dict[str, list[str]] = {ref: [] for ref in references}
+    reverse: dict[str, list[str]] = {ref: [] for ref in references}
     for source, target in arcs:
         adjacency[source].append(target)
         reverse[target].append(source)
@@ -284,7 +284,7 @@ def _ranks(
     owner = {reference: index for index, members in enumerate(components) for reference in members}
     dag_edges = {(owner[a], owner[b]) for a, b in arcs if owner[a] != owner[b]}
     incoming = {index: 0 for index in range(len(components))}
-    adjacency = {index: [] for index in range(len(components))}
+    adjacency: dict[int, list[int]] = {index: [] for index in range(len(components))}
     for source, target in dag_edges:
         adjacency[source].append(target)
         incoming[target] += 1
@@ -305,7 +305,7 @@ def _ranks(
 def _undirected_adjacency(
     references: set[str], nets: list[JsonRecord], rails: set[str]
 ) -> dict[str, set[str]]:
-    adjacency = {reference: set() for reference in references}
+    adjacency: dict[str, set[str]] = {reference: set() for reference in references}
     for net in nets:
         if str(net["name"]) in rails:
             continue

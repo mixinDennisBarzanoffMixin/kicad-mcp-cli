@@ -205,7 +205,7 @@ def test_transactional_write_allows_connectivity_equivalent_wire_coalescing(
         '  (label "RAIL" (at 0 0 0))\n'
         '  (wire (pts (xy 0 0) (xy 5 0)) (uuid "10000000-0000-0000-0000-000000000001"))\n'
         '  (wire (pts (xy 0 0) (xy 5 0)) (uuid "10000000-0000-0000-0000-000000000002"))\n'
-        ')\n',
+        ")\n",
         encoding="utf-8",
     )
 
@@ -229,9 +229,9 @@ def test_wire_normalization_preserves_intermediate_attachment_endpoints() -> Non
 
 
 def test_append_compacts_accumulated_blank_lines_on_child_sheet() -> None:
-    child = "(kicad_sch\n\t(paper \"A4\")\n" + ("\n" * 300) + ")\n"
+    child = '(kicad_sch\n\t(paper "A4")\n' + ("\n" * 300) + ")\n"
 
-    updated = _append_before_sheet_instances(child, "\t(label \"NET\" (at 1 1 0))")
+    updated = _append_before_sheet_instances(child, '\t(label "NET" (at 1 1 0))')
 
     assert "\n\n\n" not in updated
     assert updated.count('(label "NET"') == 1

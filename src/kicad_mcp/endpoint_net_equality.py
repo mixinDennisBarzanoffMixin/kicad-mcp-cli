@@ -24,17 +24,17 @@ def _normalize_endpoint(endpoint: object) -> tuple[str, str] | None:
         return None
     if not isinstance(endpoint, dict):
         return None
-    reference = endpoint.get("reference", endpoint.get("ref", endpoint.get("symbol")))
-    pin = endpoint.get(
+    raw_reference = endpoint.get("reference", endpoint.get("ref", endpoint.get("symbol")))
+    raw_pin = endpoint.get(
         "pin",
         endpoint.get(
             "pin_number",
             endpoint.get("number", endpoint.get("pin_name", endpoint.get("pad"))),
         ),
     )
-    if reference is None or pin is None:
+    if raw_reference is None or raw_pin is None:
         return None
-    return str(reference), str(pin)
+    return str(raw_reference), str(raw_pin)
 
 
 def _endpoint_lists(net: JsonRecord) -> list[object]:
@@ -160,9 +160,7 @@ def compare_compiled_endpoint_nets(
         reference = str(record["reference"])
         selector = str(record["pin"])
         candidates = [
-            pin
-            for pin in by_reference.get(reference, [])
-            if str(pin.get("pin", "")) == selector
+            pin for pin in by_reference.get(reference, []) if str(pin.get("pin", "")) == selector
         ]
         if not candidates:
             normalized_selector = _alias(selector)

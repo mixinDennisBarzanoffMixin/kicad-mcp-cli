@@ -167,17 +167,11 @@ def _board_net_names(
 ) -> list[str]:
     """Return semantic board nets across KiCad serialization versions."""
     names = {
-        name
-        for _code, name in re.findall(
-            rf"\(net\s+(\d+)\s+{STRING_PATTERN}\)", content
-        )
-        if name
+        name for _code, name in re.findall(rf"\(net\s+(\d+)\s+{STRING_PATTERN}\)", content) if name
     }
     parsed = footprints if footprints is not None else _parse_board_footprint_blocks(content)
     for footprint in parsed.values():
-        names.update(
-            name for name in dict(footprint.get("pad_nets", {})).values() if name
-        )
+        names.update(name for name in dict(footprint.get("pad_nets", {})).values() if name)
     for kind in ("segment", "arc", "via", "zone"):
         for block in _iter_blocks(content, kind):
             _code, name = _net_identity(block)
@@ -254,10 +248,7 @@ def _board_semantic_state(content: str) -> JsonRecord:
             }
         )
     tracks = [
-        {
-            key: item[key]
-            for key in ("start", "end", "width_mm", "layer", "net_code", "net")
-        }
+        {key: item[key] for key in ("start", "end", "width_mm", "layer", "net_code", "net")}
         for item in _track_records(normalized)
     ]
     vias = _via_records(normalized)
@@ -390,11 +381,16 @@ def _is_ground_net(net_name: str) -> bool:
 
 def _is_actionable_pad_net(net_name: str) -> bool:
     normalized = net_name.strip().casefold()
-    return bool(normalized) and not normalized.startswith("unconnected-(") and normalized not in {
-        "nc",
-        "n/c",
-        "no_connect",
-    }
+    return (
+        bool(normalized)
+        and not normalized.startswith("unconnected-(")
+        and normalized
+        not in {
+            "nc",
+            "n/c",
+            "no_connect",
+        }
+    )
 
 
 def _closest_pad_pair(
@@ -465,12 +461,8 @@ def power_loop_report(
         if host is None:
             missing_refs.add(host_ref)
         host_pads = list(host.get("pads", [])) if host else []
-        host_signal_pads = [
-            pad for pad in host_pads if not _is_ground_net(str(pad.get("net", "")))
-        ]
-        host_ground_pads = [
-            pad for pad in host_pads if _is_ground_net(str(pad.get("net", "")))
-        ]
+        host_signal_pads = [pad for pad in host_pads if not _is_ground_net(str(pad.get("net", "")))]
+        host_ground_pads = [pad for pad in host_pads if _is_ground_net(str(pad.get("net", "")))]
 
         for cap_ref_value in raw_pair.get("cap_refs", []):
             cap_ref = str(cap_ref_value)
@@ -484,9 +476,7 @@ def power_loop_report(
                         "reference": cap_ref,
                         "status": "missing",
                         "reason": (
-                            "host footprint is missing"
-                            if host is None
-                            else "capacitor is missing"
+                            "host footprint is missing" if host is None else "capacitor is missing"
                         ),
                     }
                 )
@@ -496,9 +486,7 @@ def power_loop_report(
             cap_signal_pads = [
                 pad for pad in cap_pads if not _is_ground_net(str(pad.get("net", "")))
             ]
-            cap_ground_pads = [
-                pad for pad in cap_pads if _is_ground_net(str(pad.get("net", "")))
-            ]
+            cap_ground_pads = [pad for pad in cap_pads if _is_ground_net(str(pad.get("net", "")))]
             forward = _closest_pad_pair(host_signal_pads, cap_signal_pads)
             return_path = _closest_pad_pair(host_ground_pads, cap_ground_pads)
             origin_distance_mm = math.hypot(
@@ -537,9 +525,7 @@ def power_loop_report(
             )
 
         group_status = (
-            "pass"
-            if members and all(item["status"] == "pass" for item in members)
-            else "fail"
+            "pass" if members and all(item["status"] == "pass" for item in members) else "fail"
         )
         groups.append(
             {
@@ -643,30 +629,17 @@ def _footprint_bounds_for_transform(
     min_y_key = "body_bbox_min_y_mm" if body_only else "bbox_min_y_mm"
     max_x_key = "body_bbox_max_x_mm" if body_only else "bbox_max_x_mm"
     max_y_key = "body_bbox_max_y_mm" if body_only else "bbox_max_y_mm"
-    min_x = float(
-        footprint.get(
-            min_x_key,
-            footprint.get("bbox_min_x_mm", -float(footprint.get("width_mm", 1.0)) / 2.0),
-        )
-    )
-    min_y = float(
-        footprint.get(
-            min_y_key,
-            footprint.get("bbox_min_y_mm", -float(footprint.get("height_mm", 1.0)) / 2.0),
-        )
-    )
-    max_x = float(
-        footprint.get(
-            max_x_key,
-            footprint.get("bbox_max_x_mm", float(footprint.get("width_mm", 1.0)) / 2.0),
-        )
-    )
-    max_y = float(
-        footprint.get(
-            max_y_key,
-            footprint.get("bbox_max_y_mm", float(footprint.get("height_mm", 1.0)) / 2.0),
-        )
-    )
+
+    def numeric(key: str, default: float) -> float:
+        value = footprint.get(key)
+        return float(value) if isinstance(value, (int, float, str)) else default
+
+    width_mm = numeric("width_mm", 1.0)
+    height_mm = numeric("height_mm", 1.0)
+    min_x = numeric(min_x_key, numeric("bbox_min_x_mm", -width_mm / 2.0))
+    min_y = numeric(min_y_key, numeric("bbox_min_y_mm", -height_mm / 2.0))
+    max_x = numeric(max_x_key, numeric("bbox_max_x_mm", width_mm / 2.0))
+    max_y = numeric(max_y_key, numeric("bbox_max_y_mm", height_mm / 2.0))
     corners = [
         _rotate_local_offset(local_x, local_y, rotation_deg)
         for local_x, local_y in (
@@ -691,10 +664,7 @@ def _rectangles_overlap(
     right: tuple[float, float, float, float],
 ) -> bool:
     return not (
-        left[2] <= right[0]
-        or left[0] >= right[2]
-        or left[3] <= right[1]
-        or left[1] >= right[3]
+        left[2] <= right[0] or left[0] >= right[2] or left[3] <= right[1] or left[1] >= right[3]
     )
 
 
@@ -753,9 +723,9 @@ def _point_on_segment(
     *,
     epsilon: float = 1e-9,
 ) -> bool:
-    cross = (point[1] - start[1]) * (end[0] - start[0]) - (
-        point[0] - start[0]
-    ) * (end[1] - start[1])
+    cross = (point[1] - start[1]) * (end[0] - start[0]) - (point[0] - start[0]) * (
+        end[1] - start[1]
+    )
     if abs(cross) > epsilon:
         return False
     return (
@@ -775,9 +745,9 @@ def _polygon_segments_intersect(
         middle: tuple[float, float],
         right: tuple[float, float],
     ) -> float:
-        return (middle[1] - left[1]) * (right[0] - middle[0]) - (
-            middle[0] - left[0]
-        ) * (right[1] - middle[1])
+        return (middle[1] - left[1]) * (right[0] - middle[0]) - (middle[0] - left[0]) * (
+            right[1] - middle[1]
+        )
 
     values = (
         orientation(first_start, first_end, second_start),
@@ -866,14 +836,10 @@ def power_loop_placement_plan(
         }
     board_bounds = tuple(float(value) for value in board_bounds_raw)
     failing_hosts = {
-        str(group["host_reference"])
-        for group in before["groups"]
-        if group["status"] != "pass"
+        str(group["host_reference"]) for group in before["groups"] if group["status"] != "pass"
     }
     selected_hosts = (
-        {reference}
-        if reference
-        else {str(group["host_reference"]) for group in before["groups"]}
+        {reference} if reference else {str(group["host_reference"]) for group in before["groups"]}
     )
     active_hosts = selected_hosts if repack else failing_hosts
     movable_cap_refs = {
@@ -928,15 +894,15 @@ def power_loop_placement_plan(
         member_by_ref = {str(member["reference"]): member for member in group["members"]}
         max_distance_mm = float(pair.get("max_distance_mm", 3.0))
         host_pads = list(host.get("pads", []))
-        host_ground_pads = [
-            pad for pad in host_pads if _is_ground_net(str(pad.get("net", "")))
-        ]
+        host_ground_pads = [pad for pad in host_pads if _is_ground_net(str(pad.get("net", "")))]
 
         ordered_cap_refs = sorted(
             (str(value) for value in pair.get("cap_refs", [])),
-            key=lambda cap_ref: -(
-                float(footprints.get(cap_ref, {}).get("width_mm", 0.0))
-                * float(footprints.get(cap_ref, {}).get("height_mm", 0.0))
+            key=lambda cap_ref: (
+                -(
+                    float(footprints.get(cap_ref, {}).get("width_mm", 0.0))
+                    * float(footprints.get(cap_ref, {}).get("height_mm", 0.0))
+                )
             ),
         )
         group_candidates: list[
@@ -960,12 +926,8 @@ def power_loop_placement_plan(
             matching_host_pads = [pad for pad in host_pads if str(pad.get("net", "")) == rail]
             cap_pads = list(cap.get("pads", []))
             matching_cap_pads = [pad for pad in cap_pads if str(pad.get("net", "")) == rail]
-            cap_ground_pads = [
-                pad for pad in cap_pads if _is_ground_net(str(pad.get("net", "")))
-            ]
-            candidates: list[
-                tuple[float, JsonRecord, list[list[tuple[float, float]]]]
-            ] = []
+            cap_ground_pads = [pad for pad in cap_pads if _is_ground_net(str(pad.get("net", "")))]
+            candidates: list[tuple[float, JsonRecord, list[list[tuple[float, float]]]]] = []
             blocker_hits: Counter[str] = Counter()
             in_bounds_transforms = 0
             for host_pad in matching_host_pads:
@@ -1053,10 +1015,9 @@ def power_loop_placement_plan(
                                         )
                                         if return_mm is None or distance < return_mm:
                                             return_mm = distance
-                                body_outward = (
-                                    (root_x - float(host_at[0])) * unit_x
-                                    + (root_y - float(host_at[1])) * unit_y
-                                )
+                                body_outward = (root_x - float(host_at[0])) * unit_x + (
+                                    root_y - float(host_at[1])
+                                ) * unit_y
                                 move_mm = math.hypot(
                                     root_x - float(cap.get("x_mm") or 0.0),
                                     root_y - float(cap.get("y_mm") or 0.0),
@@ -1184,7 +1145,7 @@ def power_loop_placement_plan(
                 ]
             ] = []
             for accumulated_score, selected_items, selected_polygons in beam:
-                for candidate_score, candidate, candidate_polygons in candidates:
+                for candidate_score, candidate_record, candidate_polygons in candidates:
                     if any(
                         _polygons_overlap(candidate_polygon, selected_polygon)
                         for candidate_polygon in candidate_polygons
@@ -1194,7 +1155,7 @@ def power_loop_placement_plan(
                     next_beam.append(
                         (
                             accumulated_score + candidate_score,
-                            [*selected_items, (cap_ref, candidate, candidate_polygons)],
+                            [*selected_items, (cap_ref, candidate_record, candidate_polygons)],
                             [*selected_polygons, *candidate_polygons],
                         )
                     )
@@ -1697,9 +1658,7 @@ def _erc_evidence(schematic: Path, *, sheet: str = "") -> JsonRecord:
 def _drc_finding_key(item: JsonRecord) -> str:
     """Identify one DRC relation independent of order and moved coordinates."""
     canonical = {
-        key: item.get(key)
-        for key in ("kind", "type", "severity")
-        if item.get(key) is not None
+        key: item.get(key) for key in ("kind", "type", "severity") if item.get(key) is not None
     }
     raw_items = item.get("items")
     if isinstance(raw_items, list):
@@ -2269,11 +2228,7 @@ def _profile_route_segments(
     result: list[tuple[list[float], list[float], float, str]] = []
     for first, second, start_distance, end_distance in raw_segments:
         cuts = [start_distance]
-        cuts.extend(
-            boundary
-            for boundary in boundaries
-            if start_distance < boundary < end_distance
-        )
+        cuts.extend(boundary for boundary in boundaries if start_distance < boundary < end_distance)
         cuts.append(end_distance)
         length = end_distance - start_distance
         for piece_start, piece_end in zip(cuts, cuts[1:], strict=False):
@@ -2358,8 +2313,10 @@ def critical_placement_report(
                         },
                     }
                 )
-        failed = bool(missing) or not measurements or any(
-            measurement["status"] == "fail" for measurement in measurements
+        failed = (
+            bool(missing)
+            or not measurements
+            or any(measurement["status"] == "fail" for measurement in measurements)
         )
         findings.append(
             {
@@ -2414,10 +2371,7 @@ def critical_placement_plan(
             "before": before,
         }
     board_bounds = tuple(float(value) for value in bounds_raw)
-    movable_refs = {
-        str(item.get("reference_b", item.get("b", "")))
-        for item in constraint_list
-    }
+    movable_refs = {str(item.get("reference_b", item.get("b", ""))) for item in constraint_list}
     yielded_refs = {str(reference) for reference in yield_references}
     occupied: list[tuple[str, tuple[float, float, float, float]]] = []
     for reference, footprint in footprints.items():
@@ -2497,8 +2451,7 @@ def critical_placement_plan(
             ),
         )
         allowed_rotations = tuple(
-            float(value)
-            for value in constraint.get("allowed_rotations", (0.0, 90.0, 180.0, 270.0))
+            float(value) for value in constraint.get("allowed_rotations", (0.0, 90.0, 180.0, 270.0))
         )
         for rotation in allowed_rotations:
             ideal_roots: list[tuple[float, float]] = []
@@ -2513,12 +2466,12 @@ def critical_placement_plan(
                     )
                 )
                 local_offsets.append((net, host_pad, offset_x, offset_y))
-            ideal_x = round(
-                (sum(root[0] for root in ideal_roots) / len(ideal_roots)) / grid_mm
-            ) * grid_mm
-            ideal_y = round(
-                (sum(root[1] for root in ideal_roots) / len(ideal_roots)) / grid_mm
-            ) * grid_mm
+            ideal_x = (
+                round((sum(root[0] for root in ideal_roots) / len(ideal_roots)) / grid_mm) * grid_mm
+            )
+            ideal_y = (
+                round((sum(root[1] for root in ideal_roots) / len(ideal_roots)) / grid_mm) * grid_mm
+            )
             for offset_x, offset_y in offsets:
                 root_x = round(ideal_x + offset_x, 6)
                 root_y = round(ideal_y + offset_y, 6)
@@ -2664,9 +2617,7 @@ def _route_collision_score(
     if len(points) < 2:
         return 0
     score = 0
-    for segment_index, (first, second) in enumerate(
-        zip(points, points[1:], strict=False), start=1
-    ):
+    for segment_index, (first, second) in enumerate(zip(points, points[1:], strict=False), start=1):
         sx1, sx2 = sorted((first[0], second[0]))
         sy1, sy2 = sorted((first[1], second[1]))
         for footprint in board["footprints"]:
@@ -2786,10 +2737,7 @@ def _segment_intersects_box(
     segment_left, segment_right = sorted((float(first[0]), float(second[0])))
     segment_top, segment_bottom = sorted((float(first[1]), float(second[1])))
     return not (
-        segment_right < left
-        or right < segment_left
-        or segment_bottom < top
-        or bottom < segment_top
+        segment_right < left or right < segment_left or segment_bottom < top or bottom < segment_top
     )
 
 
@@ -3024,9 +2972,7 @@ def placement_plan(
         origin_dx, origin_dy, geometry_width, geometry_height = rotated_geometry(
             item, rotation_by_ref[reference]
         )
-        component_margin_mm = float(
-            anchor_by_ref.get(reference, {}).get("margin_mm", margin_mm)
-        )
+        component_margin_mm = float(anchor_by_ref.get(reference, {}).get("margin_mm", margin_mm))
         components.append(
             PlacementComponent(
                 ref=reference,
@@ -3301,8 +3247,12 @@ def placement_plan(
     hpwl_delta_pct = (
         ((hpwl_after - hpwl_baseline) / hpwl_baseline) * 100.0 if hpwl_baseline > 0.0 else 0.0
     )
-    unresolved = list(stats.get("legalized_unresolved", []))
-    baseline_unresolved = list(baseline_stats.get("legalized_unresolved", []))
+    raw_unresolved = stats.get("legalized_unresolved", [])
+    raw_baseline_unresolved = baseline_stats.get("legalized_unresolved", [])
+    unresolved = list(raw_unresolved) if isinstance(raw_unresolved, list) else []
+    baseline_unresolved = (
+        list(raw_baseline_unresolved) if isinstance(raw_baseline_unresolved, list) else []
+    )
     new_unresolved = sorted(set(unresolved) - set(baseline_unresolved))
     quality_pass = hpwl_delta_pct <= 25.0 and not new_unresolved
     return {
@@ -3339,8 +3289,7 @@ def placement_plan(
                     + ", ".join(new_unresolved)
                     if new_unresolved
                     else (
-                        "weighted HPWL would regress by more than 25% versus "
-                        "the legalized baseline"
+                        "weighted HPWL would regress by more than 25% versus the legalized baseline"
                     )
                 )
             ),

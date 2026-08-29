@@ -1029,7 +1029,7 @@ def _render_candidate_track(segment: dict[str, Any]) -> str:
             f"\t(end {float(segment['x2']):.6f} {float(segment['y2']):.6f})",
             f"\t(width {float(segment['width']):.6f})",
             f'\t(layer "{layer}")',
-            f'\t(net {json.dumps(str(segment["net"]))})',
+            f"\t(net {json.dumps(str(segment['net']))})",
             f"\t(uuid {uuid.uuid4()})",
             ")",
         ]
@@ -1105,9 +1105,7 @@ def _demote_reference_fields_to_fab(content: str, references: Iterable[str]) -> 
                 continue
             if '(layer "F.SilkS")' not in property_block:
                 break
-            updated_property = property_block.replace(
-                '(layer "F.SilkS")', '(layer "F.Fab")', 1
-            )
+            updated_property = property_block.replace('(layer "F.SilkS")', '(layer "F.Fab")', 1)
             updated = updated.replace(property_block, updated_property, 1)
             changed = True
             break
@@ -1159,9 +1157,7 @@ def _run_offline_silk_cleanup(
             if str(finding.get("type", "")).startswith("silk")
             for item in finding.get("items", [])
             if isinstance(item, dict)
-            for match in [
-                re.match(r"Reference field of (\S+)$", str(item.get("description", "")))
-            ]
+            for match in [re.match(r"Reference field of (\S+)$", str(item.get("description", "")))]
             if match is not None
         }
     )
@@ -1185,9 +1181,7 @@ def _run_offline_silk_cleanup(
     (artifacts / "candidate-before-drc.json").write_text(
         json.dumps(candidate_drc, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    _write_drc_evidence_artifacts(
-        artifacts, baseline_drc, staged_drc, final_regressions
-    )
+    _write_drc_evidence_artifacts(artifacts, baseline_drc, staged_drc, final_regressions)
     rejected = bool(final_regressions["regressed"])
     return {
         "schema_version": "1.0",
@@ -1253,7 +1247,7 @@ async def _run_native_board_transaction(
         }
     artifacts = _transaction_artifacts(root, args.artifacts, label)
     artifacts.mkdir(parents=True, exist_ok=True)
-    board = get_board()
+    board: Any = get_board()
     before_content = board.get_as_string()
     (artifacts / "before.kicad_pcb").write_text(before_content, encoding="utf-8")
     before_drc = board_drc_evidence(root, board_content=before_content)
@@ -1269,7 +1263,7 @@ async def _run_native_board_transaction(
         )
     results: list[dict[str, JSONValue]] = []
     commit_active = False
-    commit: object | None = None
+    commit: Any = None
 
     def drop_commit() -> None:
         if commit is None:
@@ -1421,13 +1415,14 @@ def _native_move_footprints_batch(
             "tool": "_native_move_footprints_batch",
             "error": "placements must be a list",
         }
-    footprints = board_footprints(board)
+    native_board = cast(Any, board)
+    footprints: list[Any] = board_footprints(native_board)
     by_reference = {
         str(footprint.reference_field.text.value): footprint for footprint in footprints
     }
     missing: list[str] = []
-    resolved: list[tuple[str, object, float, float, float]] = []
-    changed: list[object] = []
+    resolved: list[tuple[str, Any, float, float, float]] = []
+    changed: list[Any] = []
     for raw in raw_placements:
         if not isinstance(raw, dict):
             return {
@@ -1455,7 +1450,14 @@ def _native_move_footprints_batch(
         orientation = getattr(footprint, "orientation", None)
         if orientation is None:
             orientation = getattr(footprint, "angle", None)
-        current_deg = float(getattr(orientation, "degrees", orientation))
+        raw_current_deg = getattr(orientation, "degrees", orientation)
+        if raw_current_deg is None:
+            return {
+                "ok": False,
+                "tool": "_native_move_footprints_batch",
+                "error": f"could not read native orientation for {reference}",
+            }
+        current_deg = float(raw_current_deg)
         delta = (current_deg - rotation_deg + 180.0) % 360.0 - 180.0
         if abs(delta) > 1e-3:
             rotation_changes.append(f"{reference}:{current_deg:g}->{rotation_deg:g}")
@@ -1472,7 +1474,7 @@ def _native_move_footprints_batch(
     for _reference, footprint, x_mm, y_mm, _rotation_deg in resolved:
         footprint.position = Vector2.from_xy_mm(x_mm, y_mm)
         changed.append(footprint)
-    board.update_items(changed)
+    native_board.update_items(changed)
     return {
         "ok": True,
         "tool": "_native_move_footprints_batch",
@@ -1517,6 +1519,7 @@ def _run_guarded_file_placement_transaction(
     label: str,
 ) -> dict[str, Any]:
     """Apply root-only transforms atomically when KiCad IPC cannot move rigidly."""
+    native_board = cast(Any, board)
     staged_content = before_content
     moved = 0
     for _tool_name, arguments in operations:
@@ -1564,7 +1567,7 @@ def _run_guarded_file_placement_transaction(
     try:
         temporary_path.write_text(staged_content, encoding="utf-8")
         temporary_path.replace(board_path)
-        board.revert()
+        native_board.revert()
         final_authority = authority_report(root)
         if not final_authority["policy"]["board_mutation_allowed"]:
             raise RuntimeError("guarded placement failed the live/disk synchronization gate")
@@ -1572,7 +1575,7 @@ def _run_guarded_file_placement_transaction(
         temporary_path.unlink(missing_ok=True)
         board_path.write_text(before_content, encoding="utf-8")
         with contextlib.suppress(Exception):
-            board.revert()
+            native_board.revert()
         raise
 
     return {
@@ -2380,8 +2383,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help=(
-            "allow only this footprint root to move and freeze every other footprint; "
-            "repeatable"
+            "allow only this footprint root to move and freeze every other footprint; repeatable"
         ),
     )
     place.add_argument(
@@ -2474,9 +2476,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="plan against an offline .kicad_pcb candidate instead of the saved board",
     )
     place_power_loops.add_argument("--grid", type=float, default=0.25, dest="grid_mm")
-    place_power_loops.add_argument(
-        "--margin", type=float, default=0.0, dest="courtyard_margin_mm"
-    )
+    place_power_loops.add_argument("--margin", type=float, default=0.0, dest="courtyard_margin_mm")
     place_power_loops.add_argument(
         "--yield-ref",
         action="append",
@@ -2529,12 +2529,12 @@ def main(argv: Sequence[str] | None = None) -> None:
                 raise SystemExit(1)
             return
         if args.command == "edit":
-            report = asyncio.run(run_staged_schematic_edit(args))
+            edit_report = asyncio.run(run_staged_schematic_edit(args))
             if args.format == "jsonl":
-                print(json.dumps(report, separators=(",", ":"), sort_keys=True))
+                print(json.dumps(edit_report, separators=(",", ":"), sort_keys=True))
             else:
-                print(json.dumps(report, indent=2, sort_keys=True))
-            if not report["promoted"]:
+                print(json.dumps(edit_report, indent=2, sort_keys=True))
+            if not edit_report["promoted"]:
                 raise SystemExit(3)
             return
         if args.command == "files":
@@ -2773,17 +2773,22 @@ def main(argv: Sequence[str] | None = None) -> None:
             _apply_runtime_options(args)
             if args.path == "-":
                 source = "stdin"
-                spec = _parse_json_object(sys.stdin.read(), source=source)
+                arrangement_spec = _parse_json_object(sys.stdin.read(), source=source)
             else:
                 path = Path(args.path).expanduser().resolve()
                 source = str(path)
-                spec = _parse_json_object(path.read_text(encoding="utf-8"), source=source)
-            result = arrange_circuit_spec(
-                spec,
-                source=source,
-                candidate_count=args.candidate_count,
-                respect_anchors=not args.reflow,
-            )
+                arrangement_spec = _parse_json_object(
+                    path.read_text(encoding="utf-8"), source=source
+                )
+            # Preserve stdout as a machine-readable data channel. Library and
+            # KiCad discovery diagnostics belong on stderr in every CLI mode.
+            with contextlib.redirect_stdout(sys.stderr):
+                result = arrange_circuit_spec(
+                    arrangement_spec,
+                    source=source,
+                    candidate_count=args.candidate_count,
+                    respect_anchors=not args.reflow,
+                )
             if args.format == "spec":
                 print(json.dumps(result["arranged_spec"], indent=2))
             elif args.format == "json":
@@ -2827,9 +2832,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 raise ValueError(f"board candidate does not exist: {candidate_path}")
             if not spec_path.is_file():
                 raise ValueError(f"routing spec does not exist: {spec_path}")
-            spec = _parse_json_object(
-                spec_path.read_text(encoding="utf-8"), source=str(spec_path)
-            )
+            spec = _parse_json_object(spec_path.read_text(encoding="utf-8"), source=str(spec_path))
             layers = _stackup_layers_from_spec(spec)
             if not args.apply:
                 report = {
@@ -2841,9 +2844,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                     "stackup": [
                         layer.model_dump(mode="json", exclude_none=True) for layer in layers
                     ],
-                    "total_thickness_mm": round(
-                        sum(layer.thickness_mm for layer in layers), 4
-                    ),
+                    "total_thickness_mm": round(sum(layer.thickness_mm for layer in layers), 4),
                 }
             else:
                 if args.mode not in {"write", "experimental"}:
@@ -2876,7 +2877,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 raise ValueError(f"board candidate does not exist: {candidate_path}")
             before_content = candidate_path.read_text(encoding="utf-8")
             audit = _pad_orientation_audit(before_content)
-            report: dict[str, Any] = audit
+            orientation_report: dict[str, Any] = audit
             if args.apply:
                 if args.mode not in {"write", "experimental"}:
                     raise ValueError("--apply requires --mode write or --mode experimental")
@@ -2898,12 +2899,9 @@ def main(argv: Sequence[str] | None = None) -> None:
                 artifacts = (
                     Path(args.artifacts).expanduser().resolve()
                     if args.artifacts
-                    else project_root
-                    / "build"
-                    / "kicadq-transactions"
-                    / "pad-orientations"
+                    else project_root / "build" / "kicadq-transactions" / "pad-orientations"
                 )
-                report = _run_offline_pad_orientation_normalization(
+                orientation_report = _run_offline_pad_orientation_normalization(
                     root=project_root,
                     before_content=before_content,
                     references=sorted(references),
@@ -2911,16 +2909,16 @@ def main(argv: Sequence[str] | None = None) -> None:
                     source=str(candidate_path),
                 )
             if args.format == "json":
-                print(json.dumps(report, indent=2, sort_keys=True))
+                print(json.dumps(orientation_report, indent=2, sort_keys=True))
             elif args.apply:
                 print(
                     json.dumps(
                         {
                             "section": "transaction",
-                            "status": report["status"],
-                            "reason": report["reason"],
-                            "changed": report["changed"],
-                            "candidate": report["candidate"],
+                            "status": orientation_report["status"],
+                            "reason": orientation_report["reason"],
+                            "changed": orientation_report["changed"],
+                            "candidate": orientation_report["candidate"],
                         },
                         separators=(",", ":"),
                         sort_keys=True,
@@ -2952,9 +2950,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 spec_path = project_root / spec_path
             if not spec_path.is_file():
                 raise ValueError(f"placement spec does not exist: {spec_path}")
-            spec = _parse_json_object(
-                spec_path.read_text(encoding="utf-8"), source=str(spec_path)
-            )
+            spec = _parse_json_object(spec_path.read_text(encoding="utf-8"), source=str(spec_path))
             raw_constraints = spec.get("critical_placement_pairs", [])
             if not isinstance(raw_constraints, list):
                 raise ValueError("critical_placement_pairs must be a JSON array")
@@ -3016,10 +3012,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 artifacts = (
                     Path(args.artifacts).expanduser().resolve()
                     if args.artifacts
-                    else project_root
-                    / "build"
-                    / "kicadq-transactions"
-                    / "critical-placement"
+                    else project_root / "build" / "kicadq-transactions" / "critical-placement"
                 )
                 transaction = _run_offline_candidate_refinement(
                     root=project_root,
@@ -3159,17 +3152,12 @@ def main(argv: Sequence[str] | None = None) -> None:
                     }
                     for placement in plan["placements"]
                 ]
-                operations = [
-                    ("_native_move_footprints_batch", {"placements": native_placements})
-                ]
+                operations = [("_native_move_footprints_batch", {"placements": native_placements})]
                 if candidate_path is not None:
                     artifacts = (
                         Path(args.artifacts).expanduser().resolve()
                         if args.artifacts
-                        else project_root
-                        / "build"
-                        / "kicadq-transactions"
-                        / "power-loop-refine"
+                        else project_root / "build" / "kicadq-transactions" / "power-loop-refine"
                     )
                     transaction = _run_offline_candidate_refinement(
                         root=project_root,
@@ -3296,15 +3284,15 @@ def main(argv: Sequence[str] | None = None) -> None:
             return
         if args.command == "place":
             project_root = Path(args.project_dir or ".").expanduser().resolve()
-            spec: dict[str, Any] = {}
+            placement_spec: dict[str, Any] = {}
             spec_path = Path(args.spec).expanduser()
             if not spec_path.is_absolute():
                 spec_path = project_root / spec_path
             if spec_path.is_file():
-                spec = _parse_json_object(
+                placement_spec = _parse_json_object(
                     spec_path.read_text(encoding="utf-8"), source=str(spec_path)
                 )
-            floorplan_raw = spec.get("placement_floorplan", {})
+            floorplan_raw = placement_spec.get("placement_floorplan", {})
             floorplan = (
                 cast(dict[str, Any], floorplan_raw) if isinstance(floorplan_raw, dict) else {}
             )
@@ -3376,37 +3364,29 @@ def main(argv: Sequence[str] | None = None) -> None:
                 ]
             fixed_references = list(args.fixed_references)
             if not fixed_references:
-                fixed_references = [
-                    str(value) for value in floorplan.get("fixed_references", [])
-                ]
+                fixed_references = [str(value) for value in floorplan.get("fixed_references", [])]
             if args.move_only_references and args.fixed_references:
                 raise ValueError("--move-only and --fix cannot be combined")
             proximity_pairs: list[dict[str, Any]] = []
-            if spec:
-                raw_pairs = spec.get("decoupling_pairs", [])
+            if placement_spec:
+                raw_pairs = placement_spec.get("decoupling_pairs", [])
                 if not isinstance(raw_pairs, list):
                     raise ValueError(f"{spec_path}: decoupling_pairs must be a JSON array")
                 proximity_pairs = [
                     cast(dict[str, Any], pair) for pair in raw_pairs if isinstance(pair, dict)
                 ]
             margin_mm = float(
-                args.margin_mm
-                if args.margin_mm is not None
-                else floorplan.get("margin_mm", 3.0)
+                args.margin_mm if args.margin_mm is not None else floorplan.get("margin_mm", 3.0)
             )
             iterations = int(
-                args.iterations
-                if args.iterations is not None
-                else floorplan.get("iterations", 300)
+                args.iterations if args.iterations is not None else floorplan.get("iterations", 300)
             )
             grid_mm = float(
                 args.grid_mm if args.grid_mm is not None else floorplan.get("grid_mm", 0.5)
             )
             seed = int(args.seed if args.seed is not None else floorplan.get("seed", 42))
             candidate_path = (
-                Path(args.board_candidate).expanduser().resolve()
-                if args.board_candidate
-                else None
+                Path(args.board_candidate).expanduser().resolve() if args.board_candidate else None
             )
             if candidate_path is not None and not candidate_path.is_file():
                 raise ValueError(f"board candidate does not exist: {candidate_path}")

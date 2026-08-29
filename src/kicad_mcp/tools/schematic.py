@@ -1665,10 +1665,7 @@ def _apply_netlist_auto_layout(
     component_refs = list(dict.fromkeys(reference for reference, _unit in placement_keys))
     ordered_components = _order_refs_by_connectivity(component_refs, nets)
     ordered_keys = [
-        key
-        for reference in ordered_components
-        for key in placement_keys
-        if key[0] == reference
+        key for reference in ordered_components for key in placement_keys if key[0] == reference
     ]
 
     cell_w = NETLIST_LAYOUT_COLUMN_SPACING_MM
@@ -4123,34 +4120,32 @@ def _orthogonal_wire_intersects(
     a_vertical = abs(ax1 - ax2) <= SNAP_TOLERANCE_MM
     b_vertical = abs(bx1 - bx2) <= SNAP_TOLERANCE_MM
     if a_vertical and b_vertical:
-        return abs(ax1 - bx1) <= SNAP_TOLERANCE_MM and max(
-            min(ay1, ay2), min(by1, by2)
-        ) <= min(max(ay1, ay2), max(by1, by2)) + SNAP_TOLERANCE_MM
+        return (
+            abs(ax1 - bx1) <= SNAP_TOLERANCE_MM
+            and max(min(ay1, ay2), min(by1, by2))
+            <= min(max(ay1, ay2), max(by1, by2)) + SNAP_TOLERANCE_MM
+        )
     if not a_vertical and not b_vertical:
-        return abs(ay1 - by1) <= SNAP_TOLERANCE_MM and max(
-            min(ax1, ax2), min(bx1, bx2)
-        ) <= min(max(ax1, ax2), max(bx1, bx2)) + SNAP_TOLERANCE_MM
+        return (
+            abs(ay1 - by1) <= SNAP_TOLERANCE_MM
+            and max(min(ax1, ax2), min(bx1, bx2))
+            <= min(max(ax1, ax2), max(bx1, bx2)) + SNAP_TOLERANCE_MM
+        )
     vertical = first if a_vertical else second
     horizontal = second if a_vertical else first
     vx = float(vertical["x1_mm"])
     hy = float(horizontal["y1_mm"])
     return (
-        min(float(horizontal["x1_mm"]), float(horizontal["x2_mm"]))
-        - SNAP_TOLERANCE_MM
+        min(float(horizontal["x1_mm"]), float(horizontal["x2_mm"])) - SNAP_TOLERANCE_MM
         <= vx
-        <= max(float(horizontal["x1_mm"]), float(horizontal["x2_mm"]))
-        + SNAP_TOLERANCE_MM
-        and min(float(vertical["y1_mm"]), float(vertical["y2_mm"]))
-        - SNAP_TOLERANCE_MM
+        <= max(float(horizontal["x1_mm"]), float(horizontal["x2_mm"])) + SNAP_TOLERANCE_MM
+        and min(float(vertical["y1_mm"]), float(vertical["y2_mm"])) - SNAP_TOLERANCE_MM
         <= hy
-        <= max(float(vertical["y1_mm"]), float(vertical["y2_mm"]))
-        + SNAP_TOLERANCE_MM
+        <= max(float(vertical["y1_mm"]), float(vertical["y2_mm"])) + SNAP_TOLERANCE_MM
     )
 
 
-def _point_on_terminal_wire(
-    point: tuple[float, float], wire: dict[str, float | bool]
-) -> bool:
+def _point_on_terminal_wire(point: tuple[float, float], wire: dict[str, float | bool]) -> bool:
     px, py = point
     x1, y1 = float(wire["x1_mm"]), float(wire["y1_mm"])
     x2, y2 = float(wire["x2_mm"]), float(wire["y2_mm"])
@@ -4222,9 +4217,7 @@ def _plan_netlist_pin_terminals(
 
     terminal_wires: list[dict[str, float | bool]] = []
     all_symbol_pin_points = {
-        _point_key(*point)
-        for points in symbol_points.values()
-        for point in points.values()
+        _point_key(*point) for points in symbol_points.values() for point in points.values()
     }
     terminal_labels: list[dict[str, Any]] = []
     terminal_powers: list[dict[str, Any]] = []
@@ -4331,9 +4324,7 @@ def _plan_netlist_pin_terminals(
                 net_needs_driver.setdefault(net_name, True)
 
             all_points = symbol_points.get(placement_key, {}).values()
-            ux, uy = _pin_label_stub_direction(
-                point, symbol_centers[placement_key], all_points
-            )
+            ux, uy = _pin_label_stub_direction(point, symbol_centers[placement_key], all_points)
             stub = _terminal_stub_length(net_name)
             ex = round(point[0] + ux * stub, 4)
             ey = round(point[1] + uy * stub, 4)
@@ -4354,8 +4345,7 @@ def _plan_netlist_pin_terminals(
                 for other in all_symbol_pin_points
             )
             crosses_existing_stub = any(
-                _orthogonal_wire_intersects(candidate_wire, existing)
-                for existing in terminal_wires
+                _orthogonal_wire_intersects(candidate_wire, existing) for existing in terminal_wires
             )
             emit_stub = not crosses_other_pin and not crosses_existing_stub
             if not emit_stub:
@@ -4601,9 +4591,7 @@ def _resolve_intentional_no_connects(
             continue
         previous = seen_points.get(key)
         if previous is not None:
-            failures.append(
-                f"{endpoint_text}: resolves to the same pin coordinate as '{previous}'"
-            )
+            failures.append(f"{endpoint_text}: resolves to the same pin coordinate as '{previous}'")
             continue
         seen_points[key] = endpoint_text
         resolved.append(key)
@@ -5530,6 +5518,20 @@ def _transactional_write_to_schematic_file(
         return str(sch_file)
 
 
+def _standard_transactional_write_to_schematic_file(
+    path: Path,
+    mutator: Callable[[str], str],
+    *,
+    allow_node_loss: bool = False,
+) -> str:
+    """Expose the common transaction signature to composed authoring services."""
+    return _transactional_write_to_schematic_file(
+        path,
+        mutator,
+        allow_node_loss=allow_node_loss,
+    )
+
+
 def _transactional_write_to_schematic(
     mutator: Callable[[str], str],
     *,
@@ -5708,10 +5710,7 @@ def _build_autoplace_fields_mutator(
             )
             obstacles.extend(label_obstacles)
             obstacles.extend(
-                box
-                for other, boxes in field_obstacles.items()
-                if other != ref
-                for box in boxes
+                box for other, boxes in field_obstacles.items() if other != ref for box in boxes
             )
             specs = [
                 FieldSpec("Reference", str(parsed.get("reference", ""))),
@@ -6713,7 +6712,7 @@ def _register_authoring(mcp: FastMCP) -> None:
         resolve_schematic_file=lambda sheet, sheet_file: (
             _resolve_schematic_target(sheet=sheet, sheet_file=sheet_file).path
         ),
-        transactional_write_to_file=_transactional_write_to_schematic_file,
+        transactional_write_to_file=_standard_transactional_write_to_schematic_file,
         shift_connected_bundle=_shift_connected_symbol_bundle,
         update_symbol_property_in_file=_update_symbol_property_in_file,
     )
@@ -6751,7 +6750,7 @@ def _register_authoring(mcp: FastMCP) -> None:
                 sheet_file=sheet_file,
             ).path
         ),
-        transactional_write_to_file=_transactional_write_to_schematic_file,
+        transactional_write_to_file=_standard_transactional_write_to_schematic_file,
     )
     schematic_destructive_edit.register(
         mcp,

@@ -349,9 +349,7 @@ def scan_project_dir(directory: Path) -> dict[str, Path | None]:
 
     project_matches = sorted(directory.glob("*.kicad_pro"))
     if project_matches:
-        result["project"] = select_canonical_kicad_file(
-            directory, project_matches, ".kicad_pro"
-        )
+        result["project"] = select_canonical_kicad_file(directory, project_matches, ".kicad_pro")
 
     project = result["project"]
     for extension, key in ((".kicad_pcb", "pcb"), (".kicad_sch", "schematic")):

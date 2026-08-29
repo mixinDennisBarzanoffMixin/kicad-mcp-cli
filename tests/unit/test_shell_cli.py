@@ -138,8 +138,7 @@ def test_drc_regression_ignores_item_order_and_unconnected_pair_churn() -> None:
     reordered = {
         **physical,
         "items": [
-            {**child, "pos": {"x": 100.0, "y": 200.0}}
-            for child in reversed(physical["items"])
+            {**child, "pos": {"x": 100.0, "y": 200.0}} for child in reversed(physical["items"])
         ],
     }
     old_unconnected = {
@@ -302,9 +301,7 @@ def test_rigid_footprint_verification_accepts_expected_pad_angle_delta() -> None
         (pad "1" smd rect (at -1 0) (size 1 3) (layers "F.Cu"))
       )
     )"""
-    arguments = {
-        "placements": [{"reference": "U1", "x_mm": 10, "y_mm": 12, "rotation_deg": 90}]
-    }
+    arguments = {"placements": [{"reference": "U1", "x_mm": 10, "y_mm": 12, "rotation_deg": 90}]}
     observed = _apply_footprint_batch_to_board_content(expected, arguments)
 
     _verify_rigid_footprint_children(expected, observed, arguments)

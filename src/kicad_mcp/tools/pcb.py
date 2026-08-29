@@ -1789,8 +1789,7 @@ def _auto_place_force_directed_board_file(
         "Force-directed auto-placement completed after PCB sync: "
         f"{len(replacements)} footprint(s), {len(nets)} weighted net(s); {convergence}."
         f" Legalization moved {stats.get('legalized_moved', 0)} footprint(s); "
-        f"unresolved: {len(cast(list[str], stats.get('legalized_unresolved', [])))}."
-        + score_lines
+        f"unresolved: {len(cast(list[str], stats.get('legalized_unresolved', [])))}." + score_lines
     )
 
 
